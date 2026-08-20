@@ -94,11 +94,21 @@ def determine_notifications(
     payload: dict[str, Any],
 ) -> tuple[str | None, list[_PendingNotification]]:
     """Pure — no I/O, easily unit-tested standalone (see tests/application/test_notifications.py).
-    Maps one verified Plane webhook payload (`apps/api/plane/bgtasks/webhook_task.py:242-390`,
-    Gate 0/7 discovery) to (work_item_id, notifications-to-buffer). Returns (None, []) for event
-    types §8.6 defines no notification trigger for — project/module/cycle events, and
-    issue create/update/delete actions with no notification-relevant `activity.field` — this is
-    scope discipline, not a missed case: §8.6's trigger list is entirely work-item-centric.
+    Maps one verified Plane webhook payload to (work_item_id, notifications-to-buffer). Returns
+    (None, []) for event types §8.6 defines no notification trigger for — project/module/cycle
+    events, and issue create/update/delete actions with no notification-relevant `activity.field`
+    — this is scope discipline, not a missed case: §8.6's trigger list is entirely work-item-centric.
+
+    `action`, and `activity.field`'s exact values, were re-verified against a real running Plane
+    instance's actual webhook deliveries (captured via ngrok, 2026-08-20) after the Gate 7/9
+    "verified against webhook_task.py" claim turned out to only be true for the literal source
+    text, not the values genuinely produced at runtime: `action` is `"created"`/`"updated"` (past
+    tense — `webhook_activity`'s `verb`, passed straight through; the HTTP-method-keyed mapping
+    dict in `webhook_send_task` never actually applies, since its input is always already one of
+    these words, never "POST"/"PATCH"/etc), and field-changed activities use the underlying model
+    field name, not the human relation name — `"state_id"` and `"assignee_ids"`, not `"state"`/
+    `"assignees"` (`data.state`/`data.assignees` — the full nested objects — are unaffected, this
+    is specifically about `activity.field`'s string value).
 
     `event="issue_comment"` is a special case: the comment payload doesn't carry the parent
     issue's assignees, so this function returns the notifications with `COMMENT` type already
@@ -125,7 +135,7 @@ def determine_notifications(
 
         if action == "updated" and isinstance(activity, dict):
             field = activity.get("field")
-            if field == "assignees":
+            if field == "assignee_ids":
                 old_ids = set(activity.get("old_value") or [])
                 new_ids = set(activity.get("new_value") or [])
                 notes = [
@@ -137,7 +147,7 @@ def determine_notifications(
                     for uid in (old_ids - new_ids)
                 ]
                 return work_item_id, notes
-            if field == "state":
+            if field == "state_id":
                 state = data.get("state") or {}
                 event_type = (
                     NotificationEventType.COMPLETED

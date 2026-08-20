@@ -378,7 +378,7 @@ async def test_full_notification_journey_with_duplicate_webhook_dedup(
         "workspace_id": "ws-1",
         "workspace_slug": "acme",
         "data": {"id": "wi-e2e-1", "assignees": [{"id": "prom-user-1"}]},
-        "activity": {"field": "assignees", "old_value": [], "new_value": ["prom-user-1"]},
+        "activity": {"field": "assignee_ids", "old_value": [], "new_value": ["prom-user-1"]},
     }
     body = json.dumps(payload).encode()
     signature = hmac.new(webhook_secret.encode(), body, hashlib.sha256).hexdigest()

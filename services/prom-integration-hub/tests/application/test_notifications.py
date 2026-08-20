@@ -46,7 +46,7 @@ def test_assignee_diff_produces_assigned_and_unassigned() -> None:
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_B}]},
-        "activity": {"field": "assignees", "old_value": [PROM_USER_A], "new_value": [PROM_USER_B]},
+        "activity": {"field": "assignee_ids", "old_value": [PROM_USER_A], "new_value": [PROM_USER_B]},
     }
     work_item_id, notes = determine_notifications(payload)
     assert work_item_id == "wi-1"
@@ -61,7 +61,7 @@ def test_state_change_to_non_completed_group_notifies_state_changed() -> None:
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}], "state": {"group": "started"}},
-        "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
+        "activity": {"field": "state_id", "old_value": "s0", "new_value": "s1"},
     }
     work_item_id, notes = determine_notifications(payload)
     assert work_item_id == "wi-1"
@@ -79,7 +79,7 @@ def test_state_change_to_completed_group_notifies_completed() -> None:
             "assignees": [{"id": PROM_USER_A}],
             "state": {"group": "completed"},
         },
-        "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
+        "activity": {"field": "state_id", "old_value": "s0", "new_value": "s1"},
     }
     _, notes = determine_notifications(payload)
     assert notes[0].event_type == NotificationEventType.COMPLETED
@@ -166,7 +166,7 @@ async def test_assignee_added_buffers_notification_for_new_assignee_only(
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
-        "activity": {"field": "assignees", "old_value": [], "new_value": [PROM_USER_A]},
+        "activity": {"field": "assignee_ids", "old_value": [], "new_value": [PROM_USER_A]},
     }
     await harness.process_webhook_event.execute(
         workspace_connection_id=workspace.id, payload=payload, correlation_id="corr-1"
@@ -190,7 +190,7 @@ async def test_assignee_removed_buffers_unassigned(
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": []},
-        "activity": {"field": "assignees", "old_value": [PROM_USER_A], "new_value": []},
+        "activity": {"field": "assignee_ids", "old_value": [PROM_USER_A], "new_value": []},
     }
     await harness.process_webhook_event.execute(
         workspace_connection_id=workspace.id, payload=payload, correlation_id="corr-1"
@@ -212,7 +212,7 @@ async def test_state_change_notifies_current_assignees(
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}], "state": {"group": "started"}},
-        "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
+        "activity": {"field": "state_id", "old_value": "s0", "new_value": "s1"},
     }
     await harness.process_webhook_event.execute(
         workspace_connection_id=workspace.id, payload=payload, correlation_id="corr-1"
@@ -350,13 +350,13 @@ async def test_two_events_within_window_collapse_into_one_batched_send(
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}], "state": {"group": "started"}},
-        "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
+        "activity": {"field": "state_id", "old_value": "s0", "new_value": "s1"},
     }
     assignee_payload = {
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
-        "activity": {"field": "assignees", "old_value": [], "new_value": [PROM_USER_A]},
+        "activity": {"field": "assignee_ids", "old_value": [], "new_value": [PROM_USER_A]},
     }
     await harness.process_webhook_event.execute(
         workspace_connection_id=workspace.id, payload=state_change_payload, correlation_id="c1"

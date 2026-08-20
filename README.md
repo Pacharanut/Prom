@@ -19,6 +19,21 @@ Prom/
     └── release-notes/               Phase 1 release notes
 ```
 
+## Clone
+
+`plane/` is a git submodule (a fork tracking its own `prom/patches` branch — see below), so a plain
+`git clone` will leave it empty. Use:
+
+```
+git clone --recurse-submodules https://github.com/Pacharanut/Prom.git
+```
+
+Already cloned without that flag? Run this instead:
+
+```
+git submodule update --init --recursive
+```
+
 ## Start here
 
 1. **`docs/architecture/00-gate0-1-discovery-and-plan.md`** — why this is built the way it is:

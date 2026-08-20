@@ -35,9 +35,10 @@ cp .env.example .env   # edit values for local dev
 ## Run
 
 ```bash
-uvicorn apps.api.main:app --reload
-# GET http://localhost:8000/healthz  -> liveness, no dependencies
-# GET http://localhost:8000/readyz   -> checks Postgres + Redis (needs them running)
+# Port 8001, not the default 8000 -- Plane's own docker-compose-local.yml already uses 8000.
+uvicorn apps.api.main:app --reload --port 8001
+# GET http://localhost:8001/healthz  -> liveness, no dependencies
+# GET http://localhost:8001/readyz   -> checks Postgres + Redis (needs them running)
 
 celery -A apps.worker.main.celery_app worker --loglevel=info
 celery -A apps.scheduler.main.celery_app beat --loglevel=info

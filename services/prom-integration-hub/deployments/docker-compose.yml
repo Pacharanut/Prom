@@ -1,3 +1,13 @@
+x-service-network-env: &service-network-env
+  # These override .env's host-oriented values (localhost:...) so that api/worker/beat/discord-bot
+  # — which run as containers on this compose network — reach postgres/redis by service name
+  # instead of localhost. .env's localhost URLs are for running those same processes natively on
+  # the host (see README's "Run" section), where they connect via the published host ports below.
+  DATABASE_URL: postgresql+asyncpg://prom:prom@postgres:5432/prom_hub
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,8 +16,7 @@ services:
       POSTGRES_PASSWORD: prom
       POSTGRES_DB: prom_hub
     ports:
-      # Host port 55432, not the default 5432: this machine already has something bound to 5432
-      # (unrelated to the `plane` stack — its own plane-db container doesn't publish to host).
+      # Host port 55432, not the default 5432: this machine already has something bound to 5432.
       # Internal container-to-container traffic (api/worker/beat -> postgres) is unaffected, since
       # compose services reach each other by service name on the container's internal port 5432.
       - "55432:5432"
@@ -17,7 +26,10 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # Host port 6380, not the default 6379: Plane's own docker-compose-local.yml publishes its
+      # plane-redis container on 6379, and both stacks need to run at once for real end-to-end
+      # testing of the Django relay -> Hub path.
+      - "6380:6379"
 
   api:
     build:
@@ -25,11 +37,15 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ../.env
+    environment:
+      <<: *service-network-env
     depends_on:
       - postgres
       - redis
     ports:
-      - "8000:8000"
+      # Host port 8001, not the default 8000: Plane's own docker-compose-local.yml publishes its
+      # Django api container on 8000. PROM_HUB_BASE_URL in plane's apps/api/.env must point here.
+      - "8001:8000"
 
   worker:
     build:
@@ -38,6 +54,8 @@ services:
     command: ["celery", "-A", "apps.worker.main.celery_app", "worker", "--loglevel=info"]
     env_file:
       - ../.env
+    environment:
+      <<: *service-network-env
     depends_on:
       - postgres
       - redis
@@ -49,6 +67,8 @@ services:
     command: ["celery", "-A", "apps.scheduler.main.celery_app", "beat", "--loglevel=info"]
     env_file:
       - ../.env
+    environment:
+      <<: *service-network-env
     depends_on:
       - postgres
       - redis
@@ -60,6 +80,8 @@ services:
     command: ["python", "-m", "apps.discord_bot.main"]
     env_file:
       - ../.env
+    environment:
+      <<: *service-network-env
     depends_on:
       - postgres
       - redis

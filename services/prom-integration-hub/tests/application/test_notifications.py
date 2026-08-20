@@ -30,7 +30,7 @@ PROM_USER_B = "prom-user-b"
 def test_issue_created_notifies_assignees() -> None:
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}, {"id": PROM_USER_B}]},
     }
     work_item_id, notes = determine_notifications(payload)
@@ -44,7 +44,7 @@ def test_issue_created_notifies_assignees() -> None:
 def test_assignee_diff_produces_assigned_and_unassigned() -> None:
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_B}]},
         "activity": {"field": "assignees", "old_value": [PROM_USER_A], "new_value": [PROM_USER_B]},
     }
@@ -59,7 +59,7 @@ def test_assignee_diff_produces_assigned_and_unassigned() -> None:
 def test_state_change_to_non_completed_group_notifies_state_changed() -> None:
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}], "state": {"group": "started"}},
         "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
     }
@@ -73,7 +73,7 @@ def test_state_change_to_non_completed_group_notifies_state_changed() -> None:
 def test_state_change_to_completed_group_notifies_completed() -> None:
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {
             "id": "wi-1",
             "assignees": [{"id": PROM_USER_A}],
@@ -89,7 +89,7 @@ def test_issue_comment_create_returns_work_item_id_but_no_notes_yet() -> None:
     """The caller (ProcessPromWebhookEvent) resolves assignees via a live Prom API lookup — see
     test_comment_notifies_current_assignees below — determine_notifications alone can't know
     them from the comment payload."""
-    payload = {"event": "issue_comment", "action": "create", "data": {"id": "c1", "issue": "wi-1"}}
+    payload = {"event": "issue_comment", "action": "created", "data": {"id": "c1", "issue": "wi-1"}}
     work_item_id, notes = determine_notifications(payload)
     assert work_item_id == "wi-1"
     assert notes == []
@@ -98,13 +98,13 @@ def test_issue_comment_create_returns_work_item_id_but_no_notes_yet() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"event": "project", "action": "update", "data": {"id": "p1"}},
-        {"event": "module", "action": "create", "data": {"id": "m1"}},
-        {"event": "cycle", "action": "delete", "data": {"id": "c1"}},
-        {"event": "issue", "action": "delete", "data": {"id": "wi-1"}},
+        {"event": "project", "action": "updated", "data": {"id": "p1"}},
+        {"event": "module", "action": "created", "data": {"id": "m1"}},
+        {"event": "cycle", "action": "deleted", "data": {"id": "c1"}},
+        {"event": "issue", "action": "deleted", "data": {"id": "wi-1"}},
         {
             "event": "issue",
-            "action": "update",
+            "action": "updated",
             "data": {"id": "wi-1"},
             "activity": {"field": "priority", "old_value": "low", "new_value": "high"},
         },
@@ -164,7 +164,7 @@ async def test_assignee_added_buffers_notification_for_new_assignee_only(
 
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
         "activity": {"field": "assignees", "old_value": [], "new_value": [PROM_USER_A]},
     }
@@ -188,7 +188,7 @@ async def test_assignee_removed_buffers_unassigned(
 
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": []},
         "activity": {"field": "assignees", "old_value": [PROM_USER_A], "new_value": []},
     }
@@ -210,7 +210,7 @@ async def test_state_change_notifies_current_assignees(
 
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}], "state": {"group": "started"}},
         "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
     }
@@ -253,7 +253,7 @@ async def test_comment_notifies_current_assignees_via_live_lookup(
 
     payload = {
         "event": "issue_comment",
-        "action": "create",
+        "action": "created",
         "data": {"id": "c1", "issue": "wi-1", "project": "p1"},
     }
     await harness.process_webhook_event.execute(
@@ -277,7 +277,7 @@ async def test_disabled_preference_suppresses_notification(
 
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(
@@ -308,7 +308,7 @@ async def test_user_linked_on_two_channels_both_get_buffered(
 
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(
@@ -327,7 +327,7 @@ async def test_unknown_workspace_connection_is_a_no_op(
     harness = notifications_harness
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(
@@ -348,13 +348,13 @@ async def test_two_events_within_window_collapse_into_one_batched_send(
 
     state_change_payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}], "state": {"group": "started"}},
         "activity": {"field": "state", "old_value": "s0", "new_value": "s1"},
     }
     assignee_payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
         "activity": {"field": "assignees", "old_value": [], "new_value": [PROM_USER_A]},
     }
@@ -385,7 +385,7 @@ async def test_event_after_a_completed_send_gets_a_fresh_record(
 
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(
@@ -418,7 +418,7 @@ async def test_flush_sends_composed_message_and_marks_sent(
     _customer, _instance, workspace, _installation, identity = await _seed_linked_setup(harness)
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(
@@ -447,7 +447,7 @@ async def test_flush_of_already_sent_record_is_a_no_op(
     _customer, _instance, workspace, _installation, identity = await _seed_linked_setup(harness)
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(
@@ -475,7 +475,7 @@ async def test_publisher_failure_increments_attempt_count_and_reraises(
     _customer, _instance, workspace, _installation, identity = await _seed_linked_setup(harness)
     payload = {
         "event": "issue",
-        "action": "create",
+        "action": "created",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_A}]},
     }
     await harness.process_webhook_event.execute(

@@ -117,13 +117,13 @@ def determine_notifications(
             return None, []
         current_assignee_ids = _extract_assignee_ids(data.get("assignees"))
 
-        if action == "create":
+        if action == "created":
             return work_item_id, [
                 _PendingNotification(uid, NotificationEventType.ASSIGNED)
                 for uid in current_assignee_ids
             ]
 
-        if action == "update" and isinstance(activity, dict):
+        if action == "updated" and isinstance(activity, dict):
             field = activity.get("field")
             if field == "assignees":
                 old_ids = set(activity.get("old_value") or [])
@@ -149,7 +149,7 @@ def determine_notifications(
                 ]
         return work_item_id, []
 
-    if event == "issue_comment" and action == "create":
+    if event == "issue_comment" and action == "created":
         work_item_id = data.get("issue")
         return (str(work_item_id) if work_item_id else None), []
 

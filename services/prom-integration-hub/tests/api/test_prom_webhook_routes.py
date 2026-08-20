@@ -46,7 +46,7 @@ def _payload(*, delivery: str = "delivery-1") -> tuple[bytes, dict[str, str]]:
     body = json.dumps(
         {
             "event": "issue",
-            "action": "create",
+            "action": "created",
             "webhook_id": "wh-1",
             "workspace_id": "ws-1",
             "workspace_slug": "acme",
@@ -137,7 +137,7 @@ async def test_valid_signature_persists_record_and_enqueues_task(
     record = await webhook_events.get_by_delivery_id("delivery-1")
     assert record is not None
     assert record.event == "issue"
-    assert record.action == "create"
+    assert record.action == "created"
 
 
 @pytest.mark.asyncio

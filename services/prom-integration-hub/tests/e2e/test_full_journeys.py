@@ -373,7 +373,7 @@ async def test_full_notification_journey_with_duplicate_webhook_dedup(
 
     payload = {
         "event": "issue",
-        "action": "update",
+        "action": "updated",
         "webhook_id": "wh-1",
         "workspace_id": "ws-1",
         "workspace_slug": "acme",

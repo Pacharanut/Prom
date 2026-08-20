@@ -50,6 +50,9 @@ git submodule update --init --recursive
 6. **`docs/release-notes/phase-1.md`** — the short version of all of the above.
 7. **`services/prom-integration-hub/README.md`** — setup, run, and test instructions for the
    actual codebase. Start there to get a dev environment running.
+8. **`docs/operations/local-dev-testing.md`** — running Plane and the Hub together on one machine
+   and actually connecting them, with every port conflict and workaround hit for real along the
+   way (not a plan — a verified, reproducible procedure).
 
 ## The two historical prototypes are gone
 

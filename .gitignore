@@ -23,3 +23,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Self-signed TLS cert/key generated for local dev testing (see docs/operations/local-dev-testing.md)
+local-tls/

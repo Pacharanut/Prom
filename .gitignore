@@ -1,0 +1,25 @@
+.DS_Store
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.import_linter_cache/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Build artifacts
+build/
+dist/
+
+# Secrets — never commit real env files, only .env.example templates
+.env
+.env.*
+!.env.example

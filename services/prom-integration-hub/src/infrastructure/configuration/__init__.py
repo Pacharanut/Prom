@@ -1,0 +1,1 @@
+"""Infrastructure: typed application settings."""

@@ -1,0 +1,1 @@
+"""Application: notifications use cases."""

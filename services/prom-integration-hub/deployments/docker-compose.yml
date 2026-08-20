@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: prom
+      POSTGRES_PASSWORD: prom
+      POSTGRES_DB: prom_hub
+    ports:
+      # Host port 55432, not the default 5432: this machine already has something bound to 5432
+      # (unrelated to the `plane` stack — its own plane-db container doesn't publish to host).
+      # Internal container-to-container traffic (api/worker/beat -> postgres) is unaffected, since
+      # compose services reach each other by service name on the container's internal port 5432.
+      - "55432:5432"
+    volumes:
+      - hub_pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["celery", "-A", "apps.worker.main.celery_app", "worker", "--loglevel=info"]
+    env_file:
+      - ../.env
+    depends_on:
+      - postgres
+      - redis
+
+  beat:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["celery", "-A", "apps.scheduler.main.celery_app", "beat", "--loglevel=info"]
+    env_file:
+      - ../.env
+    depends_on:
+      - postgres
+      - redis
+
+  discord-bot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["python", "-m", "apps.discord_bot.main"]
+    env_file:
+      - ../.env
+    depends_on:
+      - postgres
+      - redis
+    # No installation-change hot-reload (Gate 6 known limitation) — restart this service after
+    # creating/activating/revoking a Discord installation for it to take effect.
+    restart: unless-stopped
+
+volumes:
+  hub_pgdata:

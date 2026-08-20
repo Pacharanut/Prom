@@ -1,0 +1,16 @@
+"""Liveness endpoint test — no live DB/Redis required."""
+
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from apps.api.main import create_app
+
+
+def test_healthz_returns_ok() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

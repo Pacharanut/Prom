@@ -16,7 +16,7 @@ each one exists.
 | Hub API | http://localhost:8001 | not :8000 — see gotcha #4 |
 | Hub Postgres | localhost:55432 | |
 | Hub Redis | localhost:6380 | not :6379 — see gotcha #4 |
-| Local TLS proxy | https://plane.127.0.0.1.nip.io:8443 → Plane's API | see gotcha #5 |
+| Local TLS proxy | https://host.docker.internal:8443 → Plane's API | see gotcha #5 |
 
 Bootstrapped in the Hub for this test setup:
 - Customer `09de599d-9f35-42b3-b7a7-dfffb71ea810` ("Local test customer")
@@ -69,7 +69,8 @@ services:
 ```bash
 cd local-tls   # cert.pem/key.pem/nginx.conf — gitignored, regenerate if missing:
 openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 \
-  -subj "/CN=plane.127.0.0.1.nip.io" -addext "subjectAltName=DNS:plane.127.0.0.1.nip.io"
+  -subj "/CN=host.docker.internal" \
+  -addext "subjectAltName=DNS:host.docker.internal,DNS:plane.127.0.0.1.nip.io"
 
 docker run -d --name plane-tls-proxy -p 8443:8443 --restart unless-stopped \
   -v "$PWD/cert.pem:/certs/cert.pem:ro" \
@@ -77,6 +78,9 @@ docker run -d --name plane-tls-proxy -p 8443:8443 --restart unless-stopped \
   -v "$PWD/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
   nginx:alpine
 ```
+`nginx.conf`'s `server_name` must list both `host.docker.internal` (what Hub's containers use to
+reach it — see gotcha #5) and `plane.127.0.0.1.nip.io` (resolves to 127.0.0.1, only useful for
+testing the proxy *from the host shell*, not from inside any container).
 
 ### 3. Prom Integration Hub
 
@@ -90,17 +94,10 @@ docker compose -f deployments/docker-compose.yml up -d --build
 docker exec deployments-api-1 alembic upgrade head
 docker stop deployments-discord-bot-1   # until a real Discord installation exists — gotcha #6
 ```
+The TLS proxy's cert is trusted automatically (baked into each service's entrypoint, see gotcha
+#5) — no manual step needed here anymore.
 
-### 4. Trust the TLS proxy's cert inside Hub's containers (gotcha #5, redo after every rebuild)
-
-```bash
-for c in deployments-api-1 deployments-worker-1 deployments-beat-1; do
-  docker cp local-tls/cert.pem "$c:/tmp/local-test-ca.pem"
-  docker exec "$c" bash -c 'cat /tmp/local-test-ca.pem >> $(python3 -c "import certifi; print(certifi.where())")'
-done
-```
-
-### 5. Bootstrap a Customer + PromInstance (one-time per Hub database)
+### 4. Bootstrap a Customer + PromInstance (one-time per Hub database)
 
 ```bash
 TOKEN=<HUB_SERVICE_TOKEN from services/prom-integration-hub/.env>
@@ -111,11 +108,11 @@ CUSTOMER_ID=$(curl -s -X POST http://localhost:8001/api/v1/customers \
 
 INSTANCE_ID=$(curl -s -X POST http://localhost:8001/api/v1/prom-instances \
   -H "X-Hub-Service-Token: $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"customer_id\": \"$CUSTOMER_ID\", \"name\": \"Local Plane\", \"base_url\": \"https://plane.127.0.0.1.nip.io:8443\"}" \
+  -d "{\"customer_id\": \"$CUSTOMER_ID\", \"name\": \"Local Plane\", \"base_url\": \"https://host.docker.internal:8443\"}" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 ```
 
-### 6. Wire Plane to the Hub
+### 5. Wire Plane to the Hub
 
 Append to `plane/apps/api/.env`:
 ```
@@ -170,14 +167,18 @@ docker restart plane-api-1
 5. **`PromInstance.base_url` must be `https://` and non-local** (`src/domain/instances/entities.py`)
    — a deliberate security invariant, not a bug, mirroring a validator Plane itself uses for
    webhook URLs. It's real: `base_url` is on the hot path for every live work-item API call, not
-   just cosmetic. Solved with a local self-signed-TLS nginx proxy
-   (`plane-tls-proxy`, host `8443` → `host.docker.internal:8000`) using the public wildcard DNS
-   service `nip.io` so the hostname (`plane.127.0.0.1.nip.io`) doesn't match the validator's
-   localhost-looking blocklist, without needing `/etc/hosts` changes. Hub's own outbound `httpx`
-   client verifies certs by default (correctly, no code change made to weaken this) — its
-   containers were made to trust the self-signed cert by appending it to `certifi`'s bundle
-   (`docker cp` + `cat >> $(python3 -c 'import certifi; print(certifi.where())')`). **This also
-   doesn't persist** across container recreation.
+   just cosmetic. Solved with a local self-signed-TLS nginx proxy (`plane-tls-proxy`, host `8443`
+   → `host.docker.internal:8000`), certed for `host.docker.internal` (what Hub's own containers
+   resolve it as — a plain IP-encoding hostname like `plane.127.0.0.1.nip.io` looked like it
+   worked when tested from the *host* shell, but resolves to 127.0.0.1 *inside a container*, i.e.
+   itself, not the Docker host — a real, live-tested failure, not a hypothetical one; `nip.io` is
+   kept only as a second cert SAN for host-side checks). Hub's own outbound `httpx` client verifies
+   certs by default (correctly, no code change made to weaken this) — instead, every Hub service's
+   `entrypoint` in `deployments/docker-compose.yml` appends the mounted cert to `certifi`'s bundle
+   before starting the real process, so trust is baked in and survives every rebuild/recreate — no
+   manual `docker cp`/`docker exec` step needed (an earlier, manual version of this fix had to be
+   redone after every redeploy and was repeatedly forgotten in practice, most recently causing
+   every Discord bot action needing Plane's API to silently fail).
 
 6. **`discord-bot` restart-loops with zero installations** (logs
    `"no active Discord installations found — nothing to start, exiting"`, exits 0, `restart:

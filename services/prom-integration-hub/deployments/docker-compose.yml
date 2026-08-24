@@ -8,6 +8,17 @@ x-service-network-env: &service-network-env
   CELERY_BROKER_URL: redis://redis:6379/1
   CELERY_RESULT_BACKEND: redis://redis:6379/2
 
+x-trust-local-tls: &trust-local-tls
+  # Local-dev-only: trusts docs/operations/local-dev-testing.md's self-signed TLS proxy cert (see
+  # its "gotcha #5") by appending it to certifi's bundle before starting the real process --
+  # baked in here so it survives every image rebuild/container recreate, instead of a manual
+  # `docker cp` + `docker exec ... cat >> certifi...` step after each one (repeatedly forgotten in
+  # practice, most recently causing every Discord bot action needing Plane's API to silently fail
+  # with SSL: CERTIFICATE_VERIFY_FAILED after a redeploy). No-ops safely if the cert isn't mounted
+  # (i.e. deployments outside this local setup) — a missing file at /certs/cert.pem is just skipped.
+  volumes:
+    - ../../../local-tls/cert.pem:/certs/local-tls-ca.pem:ro
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -39,6 +50,10 @@ services:
       - ../.env
     environment:
       <<: *service-network-env
+    <<: *trust-local-tls
+    entrypoint: >
+      bash -c '[ -f /certs/local-tls-ca.pem ] && cat /certs/local-tls-ca.pem >> $$(python3 -c "import certifi; print(certifi.where())");
+      exec uvicorn apps.api.main:app --host 0.0.0.0 --port 8000'
     depends_on:
       - postgres
       - redis
@@ -51,11 +66,14 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["celery", "-A", "apps.worker.main.celery_app", "worker", "--loglevel=info"]
     env_file:
       - ../.env
     environment:
       <<: *service-network-env
+    <<: *trust-local-tls
+    entrypoint: >
+      bash -c '[ -f /certs/local-tls-ca.pem ] && cat /certs/local-tls-ca.pem >> $$(python3 -c "import certifi; print(certifi.where())");
+      exec celery -A apps.worker.main.celery_app worker --loglevel=info'
     depends_on:
       - postgres
       - redis
@@ -64,11 +82,14 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["celery", "-A", "apps.scheduler.main.celery_app", "beat", "--loglevel=info"]
     env_file:
       - ../.env
     environment:
       <<: *service-network-env
+    <<: *trust-local-tls
+    entrypoint: >
+      bash -c '[ -f /certs/local-tls-ca.pem ] && cat /certs/local-tls-ca.pem >> $$(python3 -c "import certifi; print(certifi.where())");
+      exec celery -A apps.scheduler.main.celery_app beat --loglevel=info'
     depends_on:
       - postgres
       - redis
@@ -77,11 +98,14 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["python", "-m", "apps.discord_bot.main"]
     env_file:
       - ../.env
     environment:
       <<: *service-network-env
+    <<: *trust-local-tls
+    entrypoint: >
+      bash -c '[ -f /certs/local-tls-ca.pem ] && cat /certs/local-tls-ca.pem >> $$(python3 -c "import certifi; print(certifi.where())");
+      exec python -m apps.discord_bot.main'
     depends_on:
       - postgres
       - redis

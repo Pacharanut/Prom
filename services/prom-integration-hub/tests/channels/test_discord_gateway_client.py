@@ -9,6 +9,8 @@ duplicate that, it only proves the discord.py glue wires correctly.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -83,7 +85,7 @@ class _RecordingHandler(DiscordWebhookHandler):  # type: ignore[misc]
 async def test_bot_authored_message_is_ignored() -> None:
     installation = _installation()
     handler = _RecordingHandler()
-    client = build_client(installation, lambda: _async_return(handler))
+    client = build_client(installation, lambda: _handler_context(handler))
 
     channel = _FakeChannel(discord.ChannelType.private)
     message = _FakeMessage(_FakeUser(1, bot=True), channel, "เมนู", 100)
@@ -97,7 +99,7 @@ async def test_bot_authored_message_is_ignored() -> None:
 async def test_non_dm_message_is_ignored() -> None:
     installation = _installation()
     handler = _RecordingHandler()
-    client = build_client(installation, lambda: _async_return(handler))
+    client = build_client(installation, lambda: _handler_context(handler))
 
     channel = _FakeChannel(discord.ChannelType.text)
     message = _FakeMessage(_FakeUser(1), channel, "เมนู", 101)
@@ -111,7 +113,7 @@ async def test_non_dm_message_is_ignored() -> None:
 async def test_dm_message_reaches_handler_and_reply_is_sent() -> None:
     installation = _installation()
     handler = _RecordingHandler()
-    client = build_client(installation, lambda: _async_return(handler))
+    client = build_client(installation, lambda: _handler_context(handler))
 
     channel = _FakeChannel(discord.ChannelType.private)
     message = _FakeMessage(_FakeUser(42), channel, "เมนู", 102)
@@ -128,5 +130,8 @@ async def test_dm_message_reaches_handler_and_reply_is_sent() -> None:
     assert channel.sent == [{"content": "ok"}]
 
 
-async def _async_return(value: DiscordWebhookHandler) -> DiscordWebhookHandler:
-    return value
+@asynccontextmanager
+async def _handler_context(value: DiscordWebhookHandler) -> AsyncIterator[DiscordWebhookHandler]:
+    """Stands in for the real handler_factory's async-context-manager shape (see
+    apps/discord_bot/main.py) without needing a real DB session."""
+    yield value

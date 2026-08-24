@@ -23,6 +23,7 @@ this gate makes.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 import discord
@@ -33,9 +34,11 @@ from src.channels.discord.handler import DiscordWebhookHandler, SendFn
 from src.domain.integrations.entities import ChannelInstallation
 from src.shared.errors import ChannelDeliveryFailedError
 
-HandlerFactory = Callable[[], Awaitable[DiscordWebhookHandler]]
+HandlerFactory = Callable[[], AbstractAsyncContextManager[DiscordWebhookHandler]]
 """Builds one DiscordWebhookHandler bound to a fresh, short-lived DB session — called once per
-inbound event, never once at startup."""
+inbound event, never once at startup. An async context manager, not a plain awaitable: entering it
+opens the session, exiting it commits (or rolls back, on exception) and closes — see
+apps/discord_bot/main.py's module docstring for why the commit matters."""
 
 _BUTTON_STYLES: dict[str, discord.ButtonStyle] = {
     "primary": discord.ButtonStyle.primary,
@@ -117,8 +120,8 @@ def build_client(
                 component_value=value,
                 dedup_id=str(interaction.id),
             )
-            handler = await handler_factory()
-            await handler.handle_event(installation, event, _send_for_interaction(interaction))
+            async with handler_factory() as handler:
+                await handler.handle_event(installation, event, _send_for_interaction(interaction))
 
         return _callback
 
@@ -155,7 +158,6 @@ def build_client(
             component_value=None,
             dedup_id=str(message.id),
         )
-        handler = await handler_factory()
 
         async def _send(out: DiscordMessage) -> None:
             view = _make_view(out)
@@ -167,6 +169,7 @@ def build_client(
             except discord.HTTPException as exc:
                 raise ChannelDeliveryFailedError(f"discord message send failed: {exc}") from exc
 
-        await handler.handle_event(installation, event, _send)
+        async with handler_factory() as handler:
+            await handler.handle_event(installation, event, _send)
 
     return client

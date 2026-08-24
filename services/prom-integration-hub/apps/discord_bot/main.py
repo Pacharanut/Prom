@@ -17,6 +17,18 @@ short-lived session (via `get_session_factory()`) for *every single inbound Disc
 session-per-operation discipline as `apps/api`'s FastAPI dependency giving each HTTP request its
 own session. A connection that can live for hours/days holding one shared session the whole time
 would be a correctness and connection-pool-exhaustion risk.
+
+`_make_handler_factory`'s factory is an async context manager (commit on clean exit, rollback +
+re-raise on exception) — the exact same shape as `src/infrastructure/database/session.py`'s
+`get_session()`, and for the same reason: a session used as a bare `async with` block only
+*closes* on exit, it does not commit, so without this every real write (account linking, work-item
+creation) made through the Discord bot would be silently discarded, and worse, left the session
+"idle in transaction" indefinitely — found via live testing 2026-08-24: three real linking-code
+submissions each left an uncommitted `INSERT INTO linked_identities` open, and every subsequent
+attempt hung forever waiting on the resulting lock (one for 29+ minutes) until the whole account-
+linking path was wedged. An earlier version of this file left the session on the handler's own
+lifetime and reasoned this was "acceptable... not treated as a bug" — that reasoning is what
+caused this; not corrected until this real failure surfaced it.
 """
 
 from __future__ import annotations
@@ -24,6 +36,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.adapters.clock import SystemClock
 from src.adapters.persistence.audit_log_repository import PostgresAuditLogRepository
@@ -77,153 +93,153 @@ def _get_prom_api_client() -> HttpPromApiClient:
 
 
 def _make_handler_factory() -> HandlerFactory:
-    """Returns a factory closure — calling it opens one fresh AsyncSession, wires every port a
-    DiscordWebhookHandler needs against it (mirrors apps/api/dependencies.py's
-    get_line_webhook_handler almost exactly), and returns the handler. The caller
-    (gateway_client.py) is responsible for the session's lifetime being exactly one event's worth
-    of work; nothing here closes the session explicitly because nothing here opened it as a
-    context manager — see the note below.
-    """
+    """Returns a factory whose call is an async context manager — entering it opens one fresh
+    AsyncSession and wires every port a DiscordWebhookHandler needs against it (mirrors
+    apps/api/dependencies.py's get_line_webhook_handler almost exactly), yielding the handler for
+    the caller (gateway_client.py) to drive one event's worth of work; exiting commits (or rolls
+    back, on exception) and closes. See this module's docstring for why the commit matters."""
 
-    async def factory() -> DiscordWebhookHandler:
-        # Deliberately NOT `async with session_factory() as session:` — that would close the
-        # session before the caller (handle_event, still awaiting) finishes using the
-        # repositories bound to it. Instead the session is left open for the handler's lifetime;
-        # AsyncSession's own garbage collection closes the underlying connection eventually, and
-        # SQLAlchemy's pool reclaims it — acceptable for Phase 1's per-event session churn given
-        # each event does a small, bounded amount of work. A Gate 7+ revisit could wrap this in an
-        # explicit try/finally once discord.py's callback shape makes that easy to express
-        # cleanly; noted in README, not treated as a bug.
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[DiscordWebhookHandler]:
         session_factory = get_session_factory()
-        session = session_factory()
-
-        secrets_provider = _get_secret_provider()
-        prom_api_client = _get_prom_api_client()
-        clock = SystemClock()
-        audit_log = PostgresAuditLogRepository(session)
-        prom_instances = PostgresPromInstanceRepository(session)
-        delegated_credentials = PostgresDelegatedCredentialRepository(session)
-        channel_installations = PostgresChannelInstallationRepository(session)
-        workspace_connections = PostgresWorkspaceConnectionRepository(session)
-        linked_identities = PostgresLinkedIdentityRepository(session)
-        linking_codes = PostgresLinkingCodeRepository(session)
-
-        # Every work-item use case takes the same five ports (see apps/api/dependencies.py's
-        # identical comment on get_create_work_item et al.) — spelled out explicitly per use case
-        # rather than dict-unpacked, to keep this constructible under mypy strict without a pile
-        # of per-call type: ignore comments.
-        list_projects = ListProjects(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        list_states = ListStates(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        list_project_members = ListProjectMembers(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        create_work_item = CreateWorkItem(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        list_my_work_items = ListMyWorkItems(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        update_work_item_state = UpdateWorkItemState(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        change_assignee = ChangeAssignee(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        add_comment = AddComment(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-        mark_complete = MarkComplete(
-            prom_instances=prom_instances,
-            delegated_credentials=delegated_credentials,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            audit_log=audit_log,
-            clock=clock,
-        )
-
-        consume_linking_code = ConsumeLinkingCode(
-            installations=channel_installations,
-            linking_codes=linking_codes,
-            linked_identities=linked_identities,
-            rate_limiter=RedisRateLimiter(get_redis_client()),
-            audit_log=audit_log,
-            clock=clock,
-        )
-
-        return DiscordWebhookHandler(
-            linked_identities=linked_identities,
-            channel_installations=channel_installations,
-            workspace_connections=workspace_connections,
-            delegated_credentials=delegated_credentials,
-            prom_instances=prom_instances,
-            secrets_provider=secrets_provider,
-            prom_api_client=prom_api_client,
-            consume_linking_code=consume_linking_code,
-            dedup_store=RedisWebhookDedupStore(get_redis_client()),
-            conversation_states=RedisConversationStateRepository(get_redis_client()),
-            create_flow=CreateWorkItemFlow(
-                list_projects=list_projects,
-                list_states=list_states,
-                list_project_members=list_project_members,
-                create_work_item=create_work_item,
-            ),
-            update_flow=UpdateWorkItemFlow(
-                list_states=list_states,
-                list_project_members=list_project_members,
-                update_work_item_state=update_work_item_state,
-                change_assignee=change_assignee,
-                add_comment=add_comment,
-                mark_complete=mark_complete,
-            ),
-            list_projects=list_projects,
-            list_my_work_items=list_my_work_items,
-        )
+        async with session_factory() as session:
+            handler = _build_handler(session)
+            try:
+                yield handler
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
     return factory
+
+
+def _build_handler(session: AsyncSession) -> DiscordWebhookHandler:
+    secrets_provider = _get_secret_provider()
+    prom_api_client = _get_prom_api_client()
+    clock = SystemClock()
+    audit_log = PostgresAuditLogRepository(session)
+    prom_instances = PostgresPromInstanceRepository(session)
+    delegated_credentials = PostgresDelegatedCredentialRepository(session)
+    channel_installations = PostgresChannelInstallationRepository(session)
+    workspace_connections = PostgresWorkspaceConnectionRepository(session)
+    linked_identities = PostgresLinkedIdentityRepository(session)
+    linking_codes = PostgresLinkingCodeRepository(session)
+
+    # Every work-item use case takes the same five ports (see apps/api/dependencies.py's
+    # identical comment on get_create_work_item et al.) — spelled out explicitly per use case
+    # rather than dict-unpacked, to keep this constructible under mypy strict without a pile
+    # of per-call type: ignore comments.
+    list_projects = ListProjects(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    list_states = ListStates(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    list_project_members = ListProjectMembers(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    create_work_item = CreateWorkItem(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    list_my_work_items = ListMyWorkItems(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    update_work_item_state = UpdateWorkItemState(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    change_assignee = ChangeAssignee(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    add_comment = AddComment(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    mark_complete = MarkComplete(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+
+    consume_linking_code = ConsumeLinkingCode(
+        installations=channel_installations,
+        linking_codes=linking_codes,
+        linked_identities=linked_identities,
+        rate_limiter=RedisRateLimiter(get_redis_client()),
+        audit_log=audit_log,
+        clock=clock,
+    )
+
+    return DiscordWebhookHandler(
+        linked_identities=linked_identities,
+        channel_installations=channel_installations,
+        workspace_connections=workspace_connections,
+        delegated_credentials=delegated_credentials,
+        prom_instances=prom_instances,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        consume_linking_code=consume_linking_code,
+        dedup_store=RedisWebhookDedupStore(get_redis_client()),
+        conversation_states=RedisConversationStateRepository(get_redis_client()),
+        create_flow=CreateWorkItemFlow(
+            list_projects=list_projects,
+            list_states=list_states,
+            list_project_members=list_project_members,
+            create_work_item=create_work_item,
+        ),
+        update_flow=UpdateWorkItemFlow(
+            list_states=list_states,
+            list_project_members=list_project_members,
+            update_work_item_state=update_work_item_state,
+            change_assignee=change_assignee,
+            add_comment=add_comment,
+            mark_complete=mark_complete,
+        ),
+        list_projects=list_projects,
+        list_my_work_items=list_my_work_items,
+    )
 
 
 async def _load_active_installations() -> list[ChannelInstallation]:

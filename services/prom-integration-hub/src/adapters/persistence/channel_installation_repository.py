@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.adapters.persistence.models import ChannelInstallationModel, InstallationWorkspaceModel
+from src.adapters.persistence.models import (
+    ChannelInstallationModel,
+    InstallationWorkspaceModel,
+    LinkingCodeModel,
+)
 from src.application.account_linking.ports import ChannelInstallationRepository
 from src.domain.integrations.entities import (
     ChannelInstallation,
@@ -137,3 +142,24 @@ class PostgresChannelInstallationRepository(ChannelInstallationRepository):
         await self._session.delete(model)
         await self._session.flush()
         return True
+
+    async def delete(self, installation_id: UUID) -> None:
+        # Own workspace-link and linking-code rows first (FK-referenced, no ON DELETE CASCADE) --
+        # DeleteChannelInstallation has already confirmed zero LinkedIdentity rows exist, so
+        # nothing else references this installation by the time the installation row itself goes.
+        await self._session.execute(
+            sa_delete(InstallationWorkspaceModel).where(
+                InstallationWorkspaceModel.channel_installation_id == installation_id
+            )
+        )
+        await self._session.execute(
+            sa_delete(LinkingCodeModel).where(
+                LinkingCodeModel.channel_installation_id == installation_id
+            )
+        )
+        await self._session.execute(
+            sa_delete(ChannelInstallationModel).where(
+                ChannelInstallationModel.id == installation_id
+            )
+        )
+        await self._session.flush()

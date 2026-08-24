@@ -9,10 +9,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from src.domain.integrations.entities import InstallationStatus
+from src.domain.identities.entities import IdentityStatus, LinkedIdentity
+from src.domain.integrations.entities import ChannelType, InstallationStatus
 from src.domain.workspaces.entities import WorkspaceConnection
 from src.shared.errors import (
     ChannelCredentialInvalidError,
+    InstallationHasLinkedIdentitiesError,
+    InstallationNotRevokedError,
     InstallationRevokedError,
     IntegrationInactiveError,
     NotFoundError,
@@ -188,6 +191,111 @@ async def test_deactivate_a_revoked_installation_also_rejected(
         await harness.deactivate_installation.execute(
             channel_installation_id=installation.id, correlation_id="corr-1"
         )
+
+
+# --- DeleteChannelInstallation ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_a_revoked_unused_installation_succeeds(
+    harness: AccountLinkingHarness,
+) -> None:
+    customer = await harness.seed_customer()
+    installation = await harness.create_active_installation(customer.id)
+    await harness.revoke_installation.execute(
+        channel_installation_id=installation.id, correlation_id="corr-revoke"
+    )
+
+    await harness.delete_installation.execute(
+        channel_installation_id=installation.id, correlation_id="corr-delete"
+    )
+
+    assert await harness.installations.get(installation.id) is None
+    entry = harness.audit_log.entries_for_action("installation.deleted")[-1]
+    assert entry.result_status.value == "success"
+
+
+@pytest.mark.asyncio
+async def test_delete_an_active_installation_is_rejected(
+    harness: AccountLinkingHarness,
+) -> None:
+    customer = await harness.seed_customer()
+    installation = await harness.create_active_installation(customer.id)
+
+    with pytest.raises(InstallationNotRevokedError):
+        await harness.delete_installation.execute(
+            channel_installation_id=installation.id, correlation_id="corr-1"
+        )
+    assert await harness.installations.get(installation.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_installation_is_not_found(
+    harness: AccountLinkingHarness,
+) -> None:
+    with pytest.raises(NotFoundError):
+        await harness.delete_installation.execute(
+            channel_installation_id=uuid4(), correlation_id="corr-1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_a_revoked_installation_with_linked_identity_history_is_rejected(
+    harness: AccountLinkingHarness,
+) -> None:
+    customer = await harness.seed_customer()
+    instance = await harness.seed_prom_instance(customer.id)
+    installation = await harness.create_active_installation(customer.id)
+    await harness.linked_identities.add(
+        LinkedIdentity(
+            id=uuid4(),
+            customer_id=customer.id,
+            channel_installation_id=installation.id,
+            channel_type=ChannelType.LINE,
+            channel_user_id="line-user-1",
+            prom_instance_id=instance.id,
+            prom_user_id="prom-user-1",
+            default_workspace_connection_id=None,
+            status=IdentityStatus.UNLINKED,
+            linked_at=harness.clock.now(),
+            unlinked_at=harness.clock.now(),
+        )
+    )
+    await harness.revoke_installation.execute(
+        channel_installation_id=installation.id, correlation_id="corr-revoke"
+    )
+
+    with pytest.raises(InstallationHasLinkedIdentitiesError):
+        await harness.delete_installation.execute(
+            channel_installation_id=installation.id, correlation_id="corr-1"
+        )
+    # Rejected before deletion -- installation and its (real, historical) identity both survive.
+    assert await harness.installations.get(installation.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_also_removes_its_own_workspace_links(
+    harness: AccountLinkingHarness,
+) -> None:
+    customer = await harness.seed_customer()
+    instance = await harness.seed_prom_instance(customer.id)
+    installation = await harness.create_active_installation(customer.id)
+    workspace = await _seed_workspace(harness, customer.id, instance.id)
+    await harness.link_workspace.execute(
+        channel_installation_id=installation.id,
+        workspace_connection_id=workspace.id,
+        is_default=True,
+        correlation_id="corr-link",
+    )
+    await harness.revoke_installation.execute(
+        channel_installation_id=installation.id, correlation_id="corr-revoke"
+    )
+
+    await harness.delete_installation.execute(
+        channel_installation_id=installation.id, correlation_id="corr-delete"
+    )
+
+    assert await harness.installations.list_workspaces(installation.id) == []
 
 
 async def _seed_workspace(

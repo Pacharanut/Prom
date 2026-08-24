@@ -39,6 +39,7 @@ from src.application.account_linking.use_cases import (
     ConsumeLinkingCode,
     CreateChannelInstallation,
     DeactivateInstallation,
+    DeleteChannelInstallation,
     LinkInstallationToWorkspace,
     RegisterWorkspaceConnection,
     RevokeInstallation,
@@ -161,6 +162,15 @@ def get_unlink_identity(session: SessionDep) -> UnlinkIdentity:
 def get_revoke_installation(session: SessionDep) -> RevokeInstallation:
     return RevokeInstallation(
         installations=PostgresChannelInstallationRepository(session),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_delete_channel_installation(session: SessionDep) -> DeleteChannelInstallation:
+    return DeleteChannelInstallation(
+        installations=PostgresChannelInstallationRepository(session),
+        linked_identities=PostgresLinkedIdentityRepository(session),
         audit_log=PostgresAuditLogRepository(session),
         clock=SystemClock(),
     )

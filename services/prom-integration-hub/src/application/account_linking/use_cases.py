@@ -47,6 +47,8 @@ from src.shared.errors import (
     ChannelCredentialInvalidError,
     DomainError,
     IdentityAlreadyLinkedError,
+    InstallationHasLinkedIdentitiesError,
+    InstallationNotRevokedError,
     InstallationRevokedError,
     IntegrationInactiveError,
     LinkingCodeExpiredError,
@@ -571,6 +573,53 @@ class RevokeInstallation:
             error_code=None,
         )
         return installation
+
+
+@dataclass
+class DeleteChannelInstallation:
+    """Hard-delete a `revoked` installation an admin created by mistake (wrong/expired
+    credentials, typo'd display name) and never actually used — distinct from `RevokeInstallation`
+    (a reversible-in-spirit status flip, kept for real audit history). Only reachable from
+    `revoked` (mirrors `InstallationRevokedError`'s one-way direction the other way), and only when
+    zero `LinkedIdentity` rows exist for it — an installation any real user ever linked through is
+    never silently removable, no matter its current status."""
+
+    installations: ChannelInstallationRepository
+    linked_identities: LinkedIdentityRepository
+    audit_log: AuditLogRepository
+    clock: Clock
+
+    async def execute(self, *, channel_installation_id: UUID, correlation_id: str) -> None:
+        installation = await self.installations.get(channel_installation_id)
+        if installation is None:
+            raise NotFoundError(f"channel_installation {channel_installation_id} not found")
+
+        if installation.status != InstallationStatus.REVOKED:
+            raise InstallationNotRevokedError(
+                "installation must be revoked before it can be deleted"
+            )
+
+        if await self.linked_identities.exists_for_installation(channel_installation_id):
+            raise InstallationHasLinkedIdentitiesError(
+                "installation has linked identity history and cannot be deleted"
+            )
+
+        await self.installations.delete(channel_installation_id)
+
+        await AuditWriter(self.audit_log, self.clock).write(
+            customer_id=installation.customer_id,
+            prom_instance_id=None,
+            installation_id=installation.id,
+            channel_type=installation.channel_type,
+            channel_user_id=None,
+            prom_user_id=None,
+            action="installation.deleted",
+            target_type="channel_installation",
+            target_id=str(installation.id),
+            correlation_id=correlation_id,
+            result_status=ResultStatus.SUCCESS,
+            error_code=None,
+        )
 
 
 @dataclass

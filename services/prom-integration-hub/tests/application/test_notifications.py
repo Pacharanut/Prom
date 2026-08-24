@@ -46,7 +46,11 @@ def test_assignee_diff_produces_assigned_and_unassigned() -> None:
         "event": "issue",
         "action": "updated",
         "data": {"id": "wi-1", "assignees": [{"id": PROM_USER_B}]},
-        "activity": {"field": "assignee_ids", "old_value": [PROM_USER_A], "new_value": [PROM_USER_B]},
+        "activity": {
+            "field": "assignee_ids",
+            "old_value": [PROM_USER_A],
+            "new_value": [PROM_USER_B],
+        },
     }
     work_item_id, notes = determine_notifications(payload)
     assert work_item_id == "wi-1"

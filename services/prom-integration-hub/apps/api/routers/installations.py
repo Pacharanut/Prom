@@ -13,6 +13,7 @@ from apps.api.dependencies import (
     get_channel_installation_repository,
     get_create_channel_installation,
     get_deactivate_installation,
+    get_delete_channel_installation,
     get_link_installation_to_workspace,
     get_revoke_installation,
     get_test_channel_connection,
@@ -34,6 +35,7 @@ from src.application.account_linking.use_cases import (
     ActivateInstallation,
     CreateChannelInstallation,
     DeactivateInstallation,
+    DeleteChannelInstallation,
     LinkInstallationToWorkspace,
     RevokeInstallation,
     TestChannelConnection,
@@ -116,6 +118,16 @@ async def revoke_installation(
         channel_installation_id=installation_id, correlation_id=_correlation_id()
     )
     return _to_response(installation)
+
+
+@router.delete("/{installation_id}", status_code=204)
+async def delete_installation(
+    installation_id: UUID,
+    use_case: Annotated[DeleteChannelInstallation, Depends(get_delete_channel_installation)],
+) -> None:
+    await use_case.execute(
+        channel_installation_id=installation_id, correlation_id=_correlation_id()
+    )
 
 
 # --- Gate 8 (Prom UI Integration) ---------------------------------------------------------

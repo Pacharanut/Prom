@@ -172,6 +172,12 @@ class FakeChannelInstallationRepository(ChannelInstallationRepository):
                 return True
         return False
 
+    async def delete(self, installation_id: UUID) -> None:
+        self._items.pop(installation_id, None)
+        for link_id, link in list(self._links.items()):
+            if link.channel_installation_id == installation_id:
+                del self._links[link_id]
+
 
 class FakeLinkedIdentityRepository(LinkedIdentityRepository):
     def __init__(self) -> None:
@@ -233,6 +239,11 @@ class FakeLinkedIdentityRepository(LinkedIdentityRepository):
             if item.status == IdentityStatus.ACTIVE
             and item.default_workspace_connection_id is not None
         ]
+
+    async def exists_for_installation(self, channel_installation_id: UUID) -> bool:
+        return any(
+            item.channel_installation_id == channel_installation_id for item in self._items.values()
+        )
 
 
 class FakeLinkingCodeRepository(LinkingCodeRepository):

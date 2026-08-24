@@ -15,6 +15,7 @@ from src.application.account_linking.use_cases import (
     ConsumeLinkingCode,
     CreateChannelInstallation,
     DeactivateInstallation,
+    DeleteChannelInstallation,
     LinkInstallationToWorkspace,
     RevokeInstallation,
     StartAccountLinking,
@@ -140,6 +141,15 @@ class AccountLinkingHarness:
     def revoke_installation(self) -> RevokeInstallation:
         return RevokeInstallation(
             installations=self.installations, audit_log=self.audit_log, clock=self.clock
+        )
+
+    @property
+    def delete_installation(self) -> DeleteChannelInstallation:
+        return DeleteChannelInstallation(
+            installations=self.installations,
+            linked_identities=self.linked_identities,
+            audit_log=self.audit_log,
+            clock=self.clock,
         )
 
     @property

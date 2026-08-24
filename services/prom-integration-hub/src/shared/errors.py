@@ -152,3 +152,26 @@ class IdempotencyKeyConflictError(DomainError):
     """
 
     error_code = "IDEMPOTENCY_KEY_CONFLICT"
+
+
+class InstallationNotRevokedError(DomainError):
+    """Raised when `DeleteChannelInstallation` is attempted on an installation whose status isn't
+    `revoked` yet — deletion is a hard, irreversible removal (unlike revoke, which just flips a
+    status flag and is fully auditable/reversible-in-spirit), so it's only reachable from the
+    terminal `revoked` state, mirroring the one-way-ness `InstallationRevokedError` already
+    enforces the other direction. Not part of the master prompt's original catalog — documented
+    addition, same pattern as the errors above.
+    """
+
+    error_code = "INSTALLATION_NOT_REVOKED"
+
+
+class InstallationHasLinkedIdentitiesError(DomainError):
+    """Raised when `DeleteChannelInstallation` is attempted on an installation that has ever had a
+    real user link to it (any `LinkedIdentity` row, active or unlinked) — that's real account-
+    linking history, not the accidental/never-used installation this action exists to clean up.
+    The admin must be shown this distinction rather than silently losing it. Not part of the
+    master prompt's original catalog — documented addition, same pattern as the errors above.
+    """
+
+    error_code = "INSTALLATION_HAS_LINKED_IDENTITIES"

@@ -112,3 +112,9 @@ class PostgresLinkedIdentityRepository(LinkedIdentityRepository):
         )
         models = (await self._session.execute(stmt)).scalars().all()
         return [_to_domain(m) for m in models]
+
+    async def exists_for_installation(self, channel_installation_id: UUID) -> bool:
+        stmt = select(LinkedIdentityModel.id).where(
+            LinkedIdentityModel.channel_installation_id == channel_installation_id
+        )
+        return (await self._session.execute(stmt)).first() is not None

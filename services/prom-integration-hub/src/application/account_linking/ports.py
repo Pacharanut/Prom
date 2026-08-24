@@ -94,6 +94,14 @@ class ChannelInstallationRepository(Protocol):
         not just active ones."""
         ...
 
+    async def delete(self, installation_id: UUID) -> None:
+        """Hard-delete one `revoked` installation and its own workspace-link/linking-code rows —
+        `DeleteChannelInstallation` is the only caller, and only after confirming REVOKED status
+        and zero `LinkedIdentity` rows, so by the time this runs there is nothing here worth
+        keeping (`audit_logs.installation_id` is a denormalized, FK-free column, so audit history
+        survives regardless)."""
+        ...
+
     async def remove_workspace_link(
         self, channel_installation_id: UUID, workspace_connection_id: UUID
     ) -> bool:
@@ -133,6 +141,12 @@ class LinkedIdentityRepository(Protocol):
         person may be linked on both LINE and Discord (or multiple installations of the same
         channel) — notify all of them, not just one, per §8.6 "Private message/DM เป็นช่องทางหลัก"
         (not "pick one channel")."""
+        ...
+
+    async def exists_for_installation(self, channel_installation_id: UUID) -> bool:
+        """Any `LinkedIdentity` row at all (active or unlinked) for one installation — added for
+        `DeleteChannelInstallation`'s safety check: real account-linking history, even if since
+        unlinked, is a reason to refuse a hard delete, not just an active link."""
         ...
 
 

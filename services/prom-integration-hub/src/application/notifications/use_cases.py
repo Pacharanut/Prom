@@ -97,7 +97,8 @@ def determine_notifications(
     Maps one verified Plane webhook payload to (work_item_id, notifications-to-buffer). Returns
     (None, []) for event types §8.6 defines no notification trigger for — project/module/cycle
     events, and issue create/update/delete actions with no notification-relevant `activity.field`
-    — this is scope discipline, not a missed case: §8.6's trigger list is entirely work-item-centric.
+    — this is scope discipline, not a missed case: §8.6's trigger list is entirely
+    work-item-centric.
 
     `action`, and `activity.field`'s exact values, were re-verified against a real running Plane
     instance's actual webhook deliveries (captured via ngrok, 2026-08-20) after the Gate 7/9

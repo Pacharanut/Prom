@@ -21,6 +21,9 @@ class NotificationEventType(StrEnum):
     DUE_SOON = "due_soon"
     DUE_TODAY = "due_today"
     OVERDUE = "overdue"
+    DAILY_SUMMARY = "daily_summary"
+    """Phase 2B: one morning message instead of one message per due/overdue work item. While
+    enabled (the default), the per-item due_soon/due_today/overdue pushes are folded into it."""
 
 
 @dataclass

@@ -41,16 +41,24 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.adapters.ai.openai_compatible import OpenAICompatibleLlmClient
 from src.adapters.clock import SystemClock
+from src.adapters.persistence.ai_settings_repository import PostgresAiSettingsRepository
 from src.adapters.persistence.audit_log_repository import PostgresAuditLogRepository
 from src.adapters.persistence.channel_installation_repository import (
     PostgresChannelInstallationRepository,
 )
+from src.adapters.persistence.classification_repository import PostgresClassificationRepository
 from src.adapters.persistence.delegated_credential_repository import (
     PostgresDelegatedCredentialRepository,
 )
+from src.adapters.persistence.group_binding_repository import PostgresGroupBindingRepository
 from src.adapters.persistence.linked_identity_repository import PostgresLinkedIdentityRepository
 from src.adapters.persistence.linking_code_repository import PostgresLinkingCodeRepository
+from src.adapters.persistence.notification_preference_repository import (
+    PostgresNotificationPreferenceRepository,
+)
+from src.adapters.persistence.outbound_message_repository import PostgresOutboundMessageRepository
 from src.adapters.persistence.prom_instance_repository import PostgresPromInstanceRepository
 from src.adapters.persistence.workspace_connection_repository import (
     PostgresWorkspaceConnectionRepository,
@@ -58,20 +66,40 @@ from src.adapters.persistence.workspace_connection_repository import (
 from src.adapters.prom_api.client import HttpPromApiClient
 from src.adapters.redis.client import get_redis_client
 from src.adapters.redis.conversation_store import RedisConversationStateRepository
+from src.adapters.redis.focus_store import RedisFocusStore
 from src.adapters.redis.rate_limiter import RedisRateLimiter
 from src.adapters.redis.webhook_dedup import RedisWebhookDedupStore
 from src.adapters.secrets.fernet_provider import FernetSecretProvider
 from src.application.account_linking.use_cases import ConsumeLinkingCode
+from src.application.ai.assistant import AiAssistant
+from src.application.ai.intent_parser import IntentParser
+from src.application.ai.ports import AiDefaults
+from src.application.ai.settings import ResolveAiConnection
+from src.application.classification.classifier import AutoClassifier, SuggestClassification
+from src.application.groups.service import GroupBindingService
+from src.application.notifications.panel import NotificationsPanel
+from src.application.notifications.preferences import (
+    GetNotificationPreferences,
+    UpdateNotificationPreferences,
+)
+from src.application.notifications.summary import BuildDailySummary
 from src.application.work_items.conversation import CreateWorkItemFlow, UpdateWorkItemFlow
+from src.application.work_items.timeline import GetWorkItemTimeline
 from src.application.work_items.use_cases import (
     AddComment,
     ChangeAssignee,
     CreateWorkItem,
+    FindBlockedWorkItems,
+    GetWorkItem,
+    ListLabels,
     ListMyWorkItems,
     ListProjectMembers,
     ListProjects,
+    ListProjectWorkItems,
     ListStates,
     MarkComplete,
+    RescheduleWorkItem,
+    SearchWorkItems,
     UpdateWorkItemState,
 )
 from src.channels.discord.gateway_client import HandlerFactory, build_client
@@ -212,6 +240,129 @@ def _build_handler(session: AsyncSession) -> DiscordWebhookHandler:
         clock=clock,
     )
 
+    list_project_work_items = ListProjectWorkItems(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    search_work_items = SearchWorkItems(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    get_work_item = GetWorkItem(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    reschedule_work_item = RescheduleWorkItem(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+
+    settings = get_settings()
+    llm_client = OpenAICompatibleLlmClient()
+    resolve_connection = ResolveAiConnection(
+        ai_settings=PostgresAiSettingsRepository(session),
+        secrets_provider=secrets_provider,
+        defaults=AiDefaults(
+            is_enabled=settings.ai_enabled,
+            base_url=settings.nt_ai_hub_base_url,
+            api_key=settings.nt_ai_hub_key,
+            model=settings.nt_ai_hub_model,
+            timeout_seconds=settings.ai_timeout_seconds,
+        ),
+    )
+    auto_classifier = AutoClassifier(
+        list_labels=ListLabels(
+            prom_instances=prom_instances,
+            delegated_credentials=delegated_credentials,
+            secrets_provider=secrets_provider,
+            prom_api_client=prom_api_client,
+            audit_log=audit_log,
+            clock=clock,
+        ),
+        suggest=SuggestClassification(
+            classification=PostgresClassificationRepository(session), llm_client=llm_client
+        ),
+        resolve_connection=resolve_connection,
+    )
+    timeline = GetWorkItemTimeline(
+        prom_instances=prom_instances,
+        delegated_credentials=delegated_credentials,
+        secrets_provider=secrets_provider,
+        prom_api_client=prom_api_client,
+        audit_log=audit_log,
+        clock=clock,
+    )
+    assistant = AiAssistant(
+        resolve_connection=resolve_connection,
+        intent_parser=IntentParser(llm_client=llm_client),
+        conversation_states=RedisConversationStateRepository(get_redis_client()),
+        focus_store=RedisFocusStore(get_redis_client()),
+        rate_limiter=RedisRateLimiter(get_redis_client()),
+        prom_instances=prom_instances,
+        audit_log=audit_log,
+        clock=clock,
+        list_projects=list_projects,
+        list_states=list_states,
+        list_project_members=list_project_members,
+        list_my_work_items=list_my_work_items,
+        list_project_work_items=list_project_work_items,
+        search_work_items=search_work_items,
+        get_work_item=get_work_item,
+        create_work_item=create_work_item,
+        update_work_item_state=update_work_item_state,
+        mark_complete=mark_complete,
+        change_assignee=change_assignee,
+        reschedule_work_item=reschedule_work_item,
+        add_comment=add_comment,
+        auto_classifier=auto_classifier,
+        get_timeline=timeline,
+    )
+
+    notification_preferences = PostgresNotificationPreferenceRepository(session)
+    notifications = NotificationsPanel(
+        get_preferences=GetNotificationPreferences(
+            linked_identities=linked_identities,
+            notification_preferences=notification_preferences,
+        ),
+        update_preferences=UpdateNotificationPreferences(
+            linked_identities=linked_identities,
+            notification_preferences=notification_preferences,
+            audit_log=audit_log,
+            clock=clock,
+        ),
+        build_daily_summary=BuildDailySummary(
+            list_projects=list_projects,
+            list_my_work_items=list_my_work_items,
+            find_blocked_work_items=FindBlockedWorkItems(
+                prom_instances=prom_instances,
+                delegated_credentials=delegated_credentials,
+                secrets_provider=secrets_provider,
+                prom_api_client=prom_api_client,
+                audit_log=audit_log,
+                clock=clock,
+            ),
+            outbound_messages=PostgresOutboundMessageRepository(session),
+            notification_preferences=notification_preferences,
+            clock=clock,
+        ),
+    )
+
     return DiscordWebhookHandler(
         linked_identities=linked_identities,
         channel_installations=channel_installations,
@@ -228,6 +379,7 @@ def _build_handler(session: AsyncSession) -> DiscordWebhookHandler:
             list_states=list_states,
             list_project_members=list_project_members,
             create_work_item=create_work_item,
+            auto_classifier=auto_classifier,
         ),
         update_flow=UpdateWorkItemFlow(
             list_states=list_states,
@@ -239,6 +391,15 @@ def _build_handler(session: AsyncSession) -> DiscordWebhookHandler:
         ),
         list_projects=list_projects,
         list_my_work_items=list_my_work_items,
+        assistant=assistant,
+        notifications=notifications,
+        timeline=timeline,
+        groups=GroupBindingService(
+            bindings=PostgresGroupBindingRepository(session),
+            list_projects=list_projects,
+            audit_log=audit_log,
+            clock=clock,
+        ),
     )
 
 

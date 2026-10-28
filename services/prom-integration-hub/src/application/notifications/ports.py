@@ -8,6 +8,7 @@ event type per identity) and the outbound-message debounce/retry/dead-letter led
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -45,6 +46,10 @@ class NotificationPreferenceRepository(Protocol):
         """Upsert — set or clear the mute for one event type."""
         ...
 
+    async def list_disabled(self, linked_identity_id: UUID) -> set[NotificationEventType]:
+        """Phase 2B: every event type this identity has muted (for the settings UI)."""
+        ...
+
 
 class OutboundMessageRepository(Protocol):
     async def get_pending(
@@ -55,5 +60,13 @@ class OutboundMessageRepository(Protocol):
         ...
 
     async def get(self, record_id: UUID) -> OutboundMessageRecord | None: ...
+    async def list_created_since(
+        self, linked_identity_id: UUID, since: datetime
+    ) -> list[OutboundMessageRecord]:
+        """Phase 2B: this identity's notification records created at or after `since`, any
+        status — the daily summary's "recently assigned" section reads ASSIGNED events from
+        here instead of asking Plane (whose public API has no assignment-history filter)."""
+        ...
+
     async def add(self, record: OutboundMessageRecord) -> None: ...
     async def save(self, record: OutboundMessageRecord) -> None: ...

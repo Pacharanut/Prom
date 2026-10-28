@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     Plane's own Webhook settings page). Not used for anything security-sensitive; a wrong value
     here just means the displayed URL is wrong, not a vulnerability."""
 
+    # --- AI assistant (Phase 2) — defaults only; Plane's Settings → AI Assistant page overrides
+    # these per customer (src/application/ai/settings.py). ------------------------------------
+    ai_enabled: bool = False
+    """Whether AI is on for a customer that has never saved settings in the UI."""
+    nt_ai_hub_base_url: str | None = None
+    """OpenAI-compatible API root, e.g. https://aihub.ntaisolution.com/core-api/v1."""
+    nt_ai_hub_key: str | None = None
+    nt_ai_hub_model: str = "gpt-oss-120b"
+    ai_timeout_seconds: int = 15
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

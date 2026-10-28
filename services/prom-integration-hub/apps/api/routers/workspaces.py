@@ -9,11 +9,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from apps.api.dependencies import (
+    get_get_classification_settings,
     get_register_workspace_connection,
+    get_update_classification_settings,
     get_workspace_connection_repository,
     require_service_token,
 )
 from apps.api.schemas import (
+    ClassificationRuleItem,
+    ClassificationSettingsResponse,
+    ClassificationSettingsUpdateRequest,
     WebhookSecretSetRequest,
     WorkspaceConnectionCreateRequest,
     WorkspaceConnectionResponse,
@@ -24,6 +29,12 @@ from src.adapters.persistence.workspace_connection_repository import (
 )
 from src.adapters.secrets.fernet_provider import FernetSecretProvider
 from src.application.account_linking.use_cases import RegisterWorkspaceConnection
+from src.application.classification.settings import (
+    GetClassificationSettings,
+    RuleInput,
+    UpdateClassificationSettings,
+)
+from src.domain.classification.entities import ClassificationSettings
 from src.domain.workspaces.entities import WorkspaceConnection
 from src.infrastructure.configuration.settings import get_settings
 from src.infrastructure.observability.logging import get_correlation_id
@@ -118,3 +129,55 @@ async def set_workspace_webhook_secret(
     workspace.updated_at = SystemClock().now()
     await repository.save(workspace)
     return _to_response(workspace)
+
+
+# --- Auto-tagging (Phase 2C) ------------------------------------------------------------------
+
+
+def _classification_response(settings: ClassificationSettings) -> ClassificationSettingsResponse:
+    return ClassificationSettingsResponse(
+        workspace_connection_id=settings.workspace_connection_id,
+        is_enabled=settings.is_enabled,
+        use_ai_fallback=settings.use_ai_fallback,
+        rules=[
+            ClassificationRuleItem(
+                keyword=rule.keyword,
+                label_name=rule.label_name,
+                priority=rule.priority.value if rule.priority else None,
+            )
+            for rule in settings.rules
+        ],
+        is_customized=settings.updated_at is not None,
+    )
+
+
+@router.get(
+    "/{workspace_connection_id}/classification", response_model=ClassificationSettingsResponse
+)
+async def get_classification_settings(
+    workspace_connection_id: UUID,
+    use_case: Annotated[GetClassificationSettings, Depends(get_get_classification_settings)],
+) -> ClassificationSettingsResponse:
+    settings = await use_case.execute(workspace_connection_id=workspace_connection_id)
+    return _classification_response(settings)
+
+
+@router.put(
+    "/{workspace_connection_id}/classification", response_model=ClassificationSettingsResponse
+)
+async def update_classification_settings(
+    workspace_connection_id: UUID,
+    body: ClassificationSettingsUpdateRequest,
+    use_case: Annotated[UpdateClassificationSettings, Depends(get_update_classification_settings)],
+) -> ClassificationSettingsResponse:
+    settings = await use_case.execute(
+        workspace_connection_id=workspace_connection_id,
+        is_enabled=body.is_enabled,
+        use_ai_fallback=body.use_ai_fallback,
+        rules=[
+            RuleInput(keyword=r.keyword, label_name=r.label_name, priority=r.priority)
+            for r in body.rules
+        ],
+        correlation_id=get_correlation_id() or "unknown",
+    )
+    return _classification_response(settings)

@@ -21,6 +21,8 @@ from src.domain.work_items.entities import (
     ProjectMemberRef,
     ProjectRef,
     WorkItem,
+    WorkItemActivity,
+    WorkItemLabel,
     WorkItemSearchResult,
     WorkItemState,
 )
@@ -69,6 +71,20 @@ class PromApiClient(Protocol):
         """GET workspaces/{slug}/projects/{project_id}/project-members-lite/"""
         ...
 
+    async def list_work_item_activities(
+        self, base_url: str, token: str, workspace_slug: str, project_id: str, work_item_id: str
+    ) -> list[WorkItemActivity]:
+        """GET workspaces/{slug}/projects/{project_id}/work-items/{id}/activities/ — newest
+        first, first page only (100). Phase 2E (timeline)."""
+        ...
+
+    async def list_labels(
+        self, base_url: str, token: str, workspace_slug: str, project_id: str
+    ) -> list[WorkItemLabel]:
+        """GET workspaces/{slug}/projects/{project_id}/labels/ — first page only (same cap as
+        list_states). Phase 2C (auto-tagging)."""
+        ...
+
     async def create_work_item(
         self,
         base_url: str,
@@ -83,6 +99,8 @@ class PromApiClient(Protocol):
         description_html: str | None,
         external_id: str,
         external_source: str,
+        priority: str | None = None,
+        label_ids: list[str] | None = None,
     ) -> tuple[WorkItem, bool]:
         """POST workspaces/{slug}/projects/{project_id}/work-items/. `external_id`+
         `external_source` are always sent — Plane's own dedup: a 409 with the existing item's id
@@ -140,6 +158,15 @@ class PromApiClient(Protocol):
     ) -> str:
         """POST workspaces/{slug}/projects/{project_id}/work-items/{id}/comments/. Returns the
         created comment's id."""
+        ...
+
+    async def list_blocked_by(
+        self, base_url: str, token: str, workspace_slug: str, project_id: str, work_item_id: str
+    ) -> list[tuple[str, str]]:
+        """GET workspaces/{slug}/projects/{project_id}/work-items/{id}/relations/ — the
+        response's `blocked_by` list as (project_id, work_item_id) pairs: the work items that
+        block this one. Phase 2B (daily summary "blocked" section); shape verified against
+        plane/apps/api/plane/api/views/issue.py IssueRelationListCreateAPIEndpoint.get."""
         ...
 
     async def search_work_items(

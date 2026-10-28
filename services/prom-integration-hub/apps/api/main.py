@@ -13,6 +13,7 @@ from sqlalchemy import text
 from apps.api.error_handlers import register_error_handlers
 from apps.api.routers import (
     account_linking,
+    ai_settings,
     customers,
     identities,
     installations,
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
 
     register_error_handlers(app)
     app.include_router(customers.router)
+    app.include_router(ai_settings.router)
     app.include_router(instances.router)
     app.include_router(workspaces.router)
     app.include_router(installations.router)

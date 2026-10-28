@@ -32,3 +32,14 @@ class AuditLogEntry:
     result_status: ResultStatus
     error_code: str | None
     occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class AuditOrigin:
+    """Phase 2E: which chat a work-item write came from. Passed by the LINE/Discord flows and the
+    AI assistant so the audit entry — and the per-work-item timeline built from it — can say
+    "from LINE" instead of leaving installation/channel blank."""
+
+    installation_id: UUID
+    channel_type: ChannelType
+    channel_user_id: str

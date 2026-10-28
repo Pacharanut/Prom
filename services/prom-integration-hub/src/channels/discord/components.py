@@ -21,7 +21,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from src.application.ai.replies import (
+    AssistantReply,
+    ChoiceReply,
+    ConfirmReply,
+    DoneReply,
+    FallbackReply,
+    NoticeReply,
+    ShortcutReply,
+    TimelineReply,
+)
+from src.application.notifications.preferences import NotificationPreferenceView
+from src.application.notifications.summary import DailySummary
 from src.application.prom_api.ports import PromUserProfile
+from src.application.work_items.timeline import TimelineEntry
+from src.channels import ai_copy, group_copy, notification_copy, timeline_copy
+from src.domain.groups.entities import GroupBinding, GroupEventType
 from src.domain.work_items.entities import ProjectMemberRef, ProjectRef, WorkItem, WorkItemState
 from src.domain.workspaces.entities import WorkspaceConnection
 
@@ -76,6 +91,8 @@ def build_menu_message() -> DiscordMessage:
             ButtonSpec(label="สร้างงาน", custom_id="menu_create"),
             ButtonSpec(label="งานของฉัน", custom_id="menu_my_tasks"),
             ButtonSpec(label="อัปเดต", custom_id="menu_update"),
+            ButtonSpec(label="สรุปงาน", custom_id="menu_summary", style="secondary"),
+            ButtonSpec(label="ตั้งค่าแจ้งเตือน", custom_id="menu_notif_settings", style="secondary"),
         ],
     )
 
@@ -139,6 +156,9 @@ def build_review_card(
     state_name: str | None,
     assignee_name: str | None,
     due_date: str | None,
+    labels: list[str] | None = None,
+    priority: str | None = None,
+    tag_source: str | None = None,
 ) -> DiscordMessage:
     lines = [
         "ตรวจสอบข้อมูลก่อนสร้างงาน:",
@@ -147,14 +167,15 @@ def build_review_card(
         f"สถานะ: {state_name or '(ค่าเริ่มต้น)'}",
         f"ผู้รับผิดชอบ: {assignee_name or '(ไม่ระบุ)'}",
         f"กำหนดส่ง: {due_date or '(ไม่ระบุ)'}",
+        *ai_copy.tagging_lines(labels or [], priority, tag_source, priority_is_explicit=False),
     ]
-    return DiscordMessage(
-        content="\n".join(lines),
-        buttons=[
-            ButtonSpec(label="ยืนยัน", custom_id="confirm", style="primary"),
-            ButtonSpec(label="ยกเลิก", custom_id="cancel", style="danger"),
-        ],
-    )
+    buttons = [ButtonSpec(label="ยืนยัน", custom_id="confirm", style="primary")]
+    if labels or priority:
+        buttons.append(
+            ButtonSpec(label="ยืนยัน (ไม่ใส่ tag)", custom_id="confirm_plain", style="secondary")
+        )
+    buttons.append(ButtonSpec(label="ยกเลิก", custom_id="cancel", style="danger"))
+    return DiscordMessage(content="\n".join(lines), buttons=buttons)
 
 
 def build_create_success_message(
@@ -242,6 +263,7 @@ def build_update_action_menu() -> DiscordMessage:
                 SelectOptionSpec(label="เพิ่ม Comment", value="comment"),
                 SelectOptionSpec(label="Assign ใหม่", value="assignee"),
                 SelectOptionSpec(label="Mark Complete", value="complete"),
+                SelectOptionSpec(label="ประวัติ", value="history"),
             ],
         ),
         buttons=[ButtonSpec(label="ยกเลิก", custom_id="cancel", style="danger")],
@@ -270,3 +292,160 @@ def build_update_success_message(*, action: str) -> DiscordMessage:
         "complete": "ทำเครื่องหมายว่าเสร็จสิ้นสำเร็จ",
     }
     return DiscordMessage(content=f"✅ {labels.get(action, 'อัปเดตสำเร็จ')}")
+
+
+# --- AI assistant (Phase 2) -------------------------------------------------------------------
+
+
+def build_ai_reply(reply: AssistantReply) -> DiscordMessage:
+    """Discord counterpart to line/messages.py's build_ai_reply — same copy (ai_copy.py),
+    Discord-native components: Buttons for confirm/cancel, a Select for every "pick one"."""
+    if isinstance(reply, ShortcutReply):
+        return build_menu_message()  # handlers open the panel themselves; never reached normally
+    if isinstance(reply, TimelineReply):
+        return DiscordMessage(
+            content=timeline_copy.timeline_text(reply.target_label, reply.entries)
+        )
+    if isinstance(reply, FallbackReply):
+        menu = build_menu_message()
+        hint = ai_copy.fallback_text(reply)
+        if hint:
+            menu.content = f"{hint}\n\n{menu.content}"
+        return menu
+    if isinstance(reply, NoticeReply):
+        return DiscordMessage(content=ai_copy.notice_text(reply.notice))
+    if isinstance(reply, DoneReply):
+        return DiscordMessage(content=ai_copy.done_text(reply))
+    if isinstance(reply, ConfirmReply):
+        buttons = [ButtonSpec(label="ยืนยัน", custom_id="ai_confirm", style="primary")]
+        if reply.can_skip_suggestions:
+            buttons.append(
+                ButtonSpec(label="ยืนยัน (ไม่ใส่ tag)", custom_id="ai_confirm_plain", style="secondary")
+            )
+        buttons.append(ButtonSpec(label="ยกเลิก", custom_id="cancel", style="danger"))
+        return DiscordMessage(content=ai_copy.confirm_text(reply), buttons=buttons)
+    if isinstance(reply, ChoiceReply):
+        options = [
+            SelectOptionSpec(label=_truncate(o.label, _OPTION_LABEL_MAX_LEN), value=o.value)
+            for o in reply.options
+        ]
+        return DiscordMessage(
+            content=ai_copy.choice_prompt(reply.kind, reply.subject),
+            select=_select("ai_pick", "เลือก", options),
+            buttons=[ButtonSpec(label="ยกเลิก", custom_id="cancel", style="danger")],
+        )
+    rows = reply.rows[:_SELECT_MAX_OPTIONS]
+    select = (
+        _select(
+            "select_work_item",
+            "เลือกงาน",
+            [
+                SelectOptionSpec(
+                    label=_truncate(f"{row.label}: {row.name}", _OPTION_LABEL_MAX_LEN),
+                    value=f"{row.project_id}:{row.work_item_id}",
+                )
+                for row in rows
+            ],
+        )
+        if rows
+        else None
+    )
+    return DiscordMessage(
+        content=ai_copy.list_text(reply, max_rows=_SELECT_MAX_OPTIONS), select=select
+    )
+
+
+# --- Notifications (Phase 2B) -----------------------------------------------------------------
+
+
+def build_preferences_panel(views: list[NotificationPreferenceView]) -> DiscordMessage:
+    options = [
+        SelectOptionSpec(
+            label=_truncate(
+                f"{notification_copy.toggle_label(view)} — "
+                f"{notification_copy.EVENT_LABELS[view.event_type]}",
+                _OPTION_LABEL_MAX_LEN,
+            ),
+            value=view.event_type.value,
+        )
+        for view in views
+    ]
+    return DiscordMessage(
+        content=notification_copy.preferences_text(views),
+        select=_select("notif_toggle", "เลือกเพื่อเปิด/ปิด", options),
+    )
+
+
+def build_summary_message(summary: DailySummary) -> DiscordMessage:
+    return DiscordMessage(content=notification_copy.compose_daily_summary(summary))
+
+
+# --- Groups (Phase 2D) ------------------------------------------------------------------------
+
+
+def build_text(text: str) -> DiscordMessage:
+    return DiscordMessage(content=text)
+
+
+def build_group_workspace_picker(workspaces: list[WorkspaceConnection]) -> DiscordMessage:
+    return DiscordMessage(
+        content=group_copy.choose_workspace_text(),
+        select=_select(
+            "group_ws",
+            "เลือก Workspace",
+            [
+                SelectOptionSpec(label=_truncate(ws.name, _OPTION_LABEL_MAX_LEN), value=str(ws.id))
+                for ws in workspaces
+            ],
+        ),
+    )
+
+
+def build_group_project_picker(
+    projects: list[ProjectRef], workspace_connection_id: str
+) -> DiscordMessage:
+    """A Select option carries one value, so it's "{workspace_connection_id}:{project_id|all}"
+    (same joining trick as build_my_tasks_list; UUIDs never contain ":")."""
+    options = [
+        SelectOptionSpec(
+            label=group_copy.ALL_PROJECTS_LABEL, value=f"{workspace_connection_id}:all"
+        )
+    ]
+    options += [
+        SelectOptionSpec(
+            label=_truncate(p.name, _OPTION_LABEL_MAX_LEN),
+            value=f"{workspace_connection_id}:{p.id}",
+        )
+        for p in projects
+    ]
+    return DiscordMessage(
+        content=group_copy.choose_project_text(),
+        select=_select("group_bind", "เลือก Project", options),
+    )
+
+
+def build_group_settings(binding: GroupBinding, *, just_bound: bool = False) -> DiscordMessage:
+    text = group_copy.bound_text(binding) if just_bound else group_copy.settings_text(binding)
+    return DiscordMessage(
+        content=text,
+        select=_select(
+            "group_toggle",
+            "เลือกเพื่อเปิด/ปิด",
+            [
+                SelectOptionSpec(
+                    label=group_copy.toggle_label(binding, event_type), value=event_type.value
+                )
+                for event_type in GroupEventType
+            ],
+        ),
+        buttons=[ButtonSpec(label="ยกเลิกผูกกลุ่ม", custom_id="group_unbind", style="danger")],
+    )
+
+
+def build_timeline_message(
+    target_label: str | None, entries: list[TimelineEntry]
+) -> DiscordMessage:
+    """Phase 2E — same as LINE's: history plus the update menu to carry on."""
+    menu = build_update_action_menu()
+    menu.content = timeline_copy.timeline_text(target_label, entries) + "\n\nเลือกการอัปเดต:"
+    return menu

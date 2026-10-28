@@ -33,3 +33,17 @@ class MessagePublisherRegistry(MessagePublisher):
             )
         else:
             raise ChannelDeliveryFailedError(f"no MessagePublisher for {channel_type}")
+
+    async def send_group_message(
+        self,
+        channel_type: ChannelType,
+        credentials: dict[str, str],
+        group_id: str,
+        text: str,
+    ) -> None:
+        if channel_type is ChannelType.LINE:
+            await self._line.send_group_message(channel_type, credentials, group_id, text)
+        elif channel_type is ChannelType.DISCORD:
+            await self._discord.send_group_message(channel_type, credentials, group_id, text)
+        else:
+            raise ChannelDeliveryFailedError(f"no group publisher for {channel_type}")

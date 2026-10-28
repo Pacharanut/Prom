@@ -13,12 +13,14 @@ from src.domain.work_items.entities import ProjectMemberRef, ProjectRef, WorkIte
 from src.domain.workspaces.entities import WorkspaceConnection
 
 
-def test_menu_message_has_three_buttons() -> None:
+def test_menu_message_has_five_buttons() -> None:
     message = comp.build_menu_message()
     assert {b.custom_id for b in message.buttons} == {
         "menu_create",
         "menu_my_tasks",
         "menu_update",
+        "menu_summary",
+        "menu_notif_settings",
     }
     assert message.select is None
     assert all(len(b.label) <= 80 for b in message.buttons)
@@ -82,6 +84,7 @@ def test_update_action_menu_is_a_select_plus_cancel_button() -> None:
         "comment",
         "assignee",
         "complete",
+        "history",
     }
     assert {b.custom_id for b in message.buttons} == {"cancel"}
 

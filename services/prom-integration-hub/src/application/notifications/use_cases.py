@@ -26,10 +26,16 @@ from src.application.account_linking.ports import (
     SecretProvider,
     WorkspaceConnectionRepository,
 )
+from src.application.groups.notifier import GroupNotifier
 from src.application.notifications.ports import (
     MessagePublisher,
     NotificationPreferenceRepository,
     OutboundMessageRepository,
+)
+from src.application.notifications.summary import (
+    BuildDailySummary,
+    DailySummary,
+    resolve_identity_workspace,
 )
 from src.application.prom_api.ports import PromApiClient
 from src.application.shared.audit_writer import AuditWriter
@@ -261,6 +267,8 @@ class ProcessPromWebhookEvent:
     plain synchronous callable (Celery's own `apply_async` is itself synchronous, it just enqueues
     to the broker) injected so this module never imports celery directly (framework-free rule).
     The real implementation lives in src/infrastructure/messaging/notification_tasks.py."""
+    group_notifier: GroupNotifier | None = None
+    """Phase 2D: also posts created/assigned/completed events into bound groups."""
 
     async def execute(
         self, *, workspace_connection_id: UUID, payload: dict[str, Any], correlation_id: str
@@ -272,6 +280,12 @@ class ProcessPromWebhookEvent:
         work_item_id, notifications = determine_notifications(payload)
         if work_item_id is None:
             return
+
+        if self.group_notifier is not None:
+            try:
+                await self.group_notifier.notify(workspace_connection, payload, correlation_id)
+            except DomainError:
+                pass  # group posts are best-effort; personal notifications must still go out
 
         if payload.get("event") == "issue_comment":
             notifications = await self._resolve_comment_assignees(workspace_connection, payload)
@@ -441,9 +455,17 @@ class CheckDueDateNotifications:
     """Reused as-is rather than adding a second near-identical port — same
     `.mark_seen_if_new(key, ttl_seconds) -> bool` shape LINE/Discord webhook dedup already uses,
     just with a different key namespace (`due-notify:...` vs `webhook-seen:...`)."""
+    build_daily_summary: BuildDailySummary | None = None
+    compose_summary: Callable[[DailySummary], str] | None = None
+    """Phase 2B: when both are wired (the Celery task does) and the identity's DAILY_SUMMARY
+    switch is on (default), one summary message replaces the per-item pushes below. The text is
+    composed by the channel layer (src/channels/notification_copy.py) and injected here."""
 
     async def execute(self, *, correlation_id: str) -> None:
-        identities = await self.linked_identities.list_all_active_with_default_workspace()
+        # Phase 2B: every active identity, workspace resolved like the chat handlers do —
+        # previously only identities with their *own* default workspace were notified, which
+        # silently skipped everyone linked through the Connected Accounts page.
+        identities = await self.linked_identities.list_all_active()
         sender = SendPrivateNotification(
             installations=self.installations,
             secrets_provider=self.secrets_provider,
@@ -454,11 +476,20 @@ class CheckDueDateNotifications:
         today = self.clock.now().date().isoformat()
 
         for identity in identities:
-            assert identity.default_workspace_connection_id is not None
-            workspace = await self.workspace_connections.get(
-                identity.default_workspace_connection_id
+            workspace = await resolve_identity_workspace(
+                identity, self.installations, self.workspace_connections
             )
             if workspace is None:
+                continue
+
+            if (
+                self.build_daily_summary is not None
+                and self.compose_summary is not None
+                and await self.notification_preferences.is_enabled(
+                    identity.id, NotificationEventType.DAILY_SUMMARY
+                )
+            ):
+                await self._send_summary(identity, workspace, sender, today, correlation_id)
                 continue
 
             try:
@@ -504,3 +535,34 @@ class CheckDueDateNotifications:
                         )
                     except DomainError:
                         continue
+
+    async def _send_summary(
+        self,
+        identity: LinkedIdentity,
+        workspace: WorkspaceConnection,
+        sender: SendPrivateNotification,
+        today: str,
+        correlation_id: str,
+    ) -> None:
+        assert self.build_daily_summary is not None and self.compose_summary is not None
+        key = f"daily-summary:{identity.id}:{today}"
+        if not await self.dedup_store.mark_seen_if_new(key, _DUE_DEDUP_TTL_SECONDS):
+            return
+        try:
+            summary = await self.build_daily_summary.execute(
+                identity=identity,
+                workspace_slug=workspace.prom_workspace_slug,
+                correlation_id=correlation_id,
+            )
+        except DomainError:
+            return
+        if summary.is_empty:
+            return  # nothing to report — no "you have nothing" message every morning
+        try:
+            await sender.execute(
+                linked_identity=identity,
+                text=self.compose_summary(summary),
+                correlation_id=correlation_id,
+            )
+        except DomainError:
+            return

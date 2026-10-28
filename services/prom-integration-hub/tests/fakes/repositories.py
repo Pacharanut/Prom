@@ -4,9 +4,11 @@ src/application/account_linking/ports.py and src/application/work_items/ports.py
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from src.application.account_linking.ports import (
+    AuditLogFilters,
     AuditLogRepository,
     ChannelInstallationRepository,
     CustomerRepository,
@@ -16,14 +18,18 @@ from src.application.account_linking.ports import (
     PromInstanceRepository,
     WorkspaceConnectionRepository,
 )
+from src.application.ai.ports import AiSettingsRepository
 from src.application.notifications.ports import (
     NotificationPreferenceRepository,
     OutboundMessageRepository,
 )
 from src.application.webhooks.ports import WebhookEventRepository
 from src.application.work_items.ports import IdempotencyRepository
+from src.domain.ai.entities import AiSettings
 from src.domain.audit.entities import AuditLogEntry
+from src.domain.classification.entities import ClassificationSettings
 from src.domain.customers.entities import Customer
+from src.domain.groups.entities import GroupBinding
 from src.domain.idempotency.entities import IdempotencyRecord
 from src.domain.identities.entities import (
     DelegatedCredential,
@@ -232,6 +238,9 @@ class FakeLinkedIdentityRepository(LinkedIdentityRepository):
             and item.status == IdentityStatus.ACTIVE
         ]
 
+    async def list_all_active(self) -> list[LinkedIdentity]:
+        return [item for item in self._items.values() if item.status == IdentityStatus.ACTIVE]
+
     async def list_all_active_with_default_workspace(self) -> list[LinkedIdentity]:
         return [
             item
@@ -319,15 +328,32 @@ class FakeAuditLogRepository(AuditLogRepository):
         installation_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
+        filters: AuditLogFilters | None = None,
     ) -> list[AuditLogEntry]:
+        f = filters or AuditLogFilters()
         matches = [
             entry
             for entry in self.entries
             if entry.customer_id == customer_id
             and (installation_id is None or entry.installation_id == installation_id)
+            and (f.channel_type is None or entry.channel_type == f.channel_type)
+            and (not f.action_contains or f.action_contains in entry.action)
+            and (not f.target_id or entry.target_id == f.target_id)
+            and (f.result_status is None or entry.result_status == f.result_status)
+            and (f.occurred_after is None or entry.occurred_at >= f.occurred_after)
+            and (f.occurred_before is None or entry.occurred_at < f.occurred_before)
         ]
         matches.sort(key=lambda e: e.occurred_at, reverse=True)
         return matches[offset : offset + limit]
+
+    async def list_for_target(
+        self, target_type: str, target_id: str, *, limit: int = 100
+    ) -> list[AuditLogEntry]:
+        matches = [
+            e for e in self.entries if e.target_type == target_type and e.target_id == target_id
+        ]
+        matches.sort(key=lambda e: e.occurred_at, reverse=True)
+        return matches[:limit]
 
 
 class FakeIdempotencyRepository(IdempotencyRepository):
@@ -362,6 +388,9 @@ class FakeNotificationPreferenceRepository(NotificationPreferenceRepository):
             self._disabled.discard(key)
         else:
             self._disabled.add(key)
+
+    async def list_disabled(self, linked_identity_id: UUID) -> set[NotificationEventType]:
+        return {t for (i, t) in self._disabled if i == linked_identity_id}
 
 
 class FakeWebhookEventRepository(WebhookEventRepository):
@@ -406,8 +435,73 @@ class FakeOutboundMessageRepository(OutboundMessageRepository):
     async def get(self, record_id: UUID) -> OutboundMessageRecord | None:
         return self._items.get(record_id)
 
+    async def list_created_since(
+        self, linked_identity_id: UUID, since: datetime
+    ) -> list[OutboundMessageRecord]:
+        return sorted(
+            (
+                r
+                for r in self._items.values()
+                if r.linked_identity_id == linked_identity_id and r.created_at >= since
+            ),
+            key=lambda r: r.created_at,
+            reverse=True,
+        )
+
     async def add(self, record: OutboundMessageRecord) -> None:
         self._items[record.id] = record
 
     async def save(self, record: OutboundMessageRecord) -> None:
         self._items[record.id] = record
+
+
+class FakeAiSettingsRepository(AiSettingsRepository):
+    def __init__(self) -> None:
+        self._items: dict[UUID, AiSettings] = {}
+
+    async def get_by_customer(self, customer_id: UUID) -> AiSettings | None:
+        return self._items.get(customer_id)
+
+    async def save(self, settings: AiSettings) -> None:
+        self._items[settings.customer_id] = settings
+
+
+class FakeClassificationRepository:
+    def __init__(self) -> None:
+        self._items: dict[UUID, ClassificationSettings] = {}
+
+    async def get(self, workspace_connection_id: UUID) -> ClassificationSettings:
+        found = self._items.get(workspace_connection_id)
+        if found is None:
+            return ClassificationSettings(workspace_connection_id=workspace_connection_id)
+        return ClassificationSettings(
+            workspace_connection_id=found.workspace_connection_id,
+            is_enabled=found.is_enabled,
+            use_ai_fallback=found.use_ai_fallback,
+            rules=list(found.rules),
+            updated_at=found.updated_at,
+        )
+
+    async def save(self, settings: ClassificationSettings) -> None:
+        self._items[settings.workspace_connection_id] = settings
+
+
+class FakeGroupBindingRepository:
+    def __init__(self) -> None:
+        self._items: dict[tuple[UUID, str], GroupBinding] = {}
+
+    async def get_by_group(
+        self, channel_installation_id: UUID, group_id: str
+    ) -> GroupBinding | None:
+        return self._items.get((channel_installation_id, group_id))
+
+    async def list_for_workspace(self, workspace_connection_id: UUID) -> list[GroupBinding]:
+        return [
+            b for b in self._items.values() if b.workspace_connection_id == workspace_connection_id
+        ]
+
+    async def save(self, binding: GroupBinding) -> None:
+        self._items[(binding.channel_installation_id, binding.group_id)] = binding
+
+    async def delete(self, binding_id: UUID) -> None:
+        self._items = {k: v for k, v in self._items.items() if v.id != binding_id}

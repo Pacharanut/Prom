@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 @dataclass
 class LineEvent:
-    event_type: Literal["message", "postback", "other"]
+    event_type: Literal["message", "postback", "join", "other"]
     user_id: str | None
     reply_token: str | None
     text: str | None
@@ -18,6 +18,8 @@ class LineEvent:
     message_id: str | None
     webhook_event_id: str | None
     timestamp: int | None
+    group_id: str | None = None
+    """Phase 2D: source.groupId / source.roomId when the event came from a group chat."""
 
     def dedup_key(self) -> str:
         """Prefers LINE's own `webhookEventId` (present on recent API versions) — falls back to a
@@ -34,6 +36,7 @@ def parse_line_webhook(payload: dict[str, Any]) -> list[LineEvent]:
     for raw_event in payload.get("events", []):
         source = raw_event.get("source") or {}
         user_id = source.get("userId")
+        group_id = source.get("groupId") or source.get("roomId")
         reply_token = raw_event.get("replyToken")
         webhook_event_id = raw_event.get("webhookEventId")
         timestamp = raw_event.get("timestamp")
@@ -51,6 +54,7 @@ def parse_line_webhook(payload: dict[str, Any]) -> list[LineEvent]:
                     message_id=message.get("id"),
                     webhook_event_id=webhook_event_id,
                     timestamp=timestamp,
+                    group_id=group_id,
                 )
             )
         elif raw_type == "postback":
@@ -65,12 +69,13 @@ def parse_line_webhook(payload: dict[str, Any]) -> list[LineEvent]:
                     message_id=None,
                     webhook_event_id=webhook_event_id,
                     timestamp=timestamp,
+                    group_id=group_id,
                 )
             )
         else:
             events.append(
                 LineEvent(
-                    event_type="other",
+                    event_type="join" if raw_type == "join" else "other",
                     user_id=user_id,
                     reply_token=reply_token,
                     text=None,
@@ -78,6 +83,7 @@ def parse_line_webhook(payload: dict[str, Any]) -> list[LineEvent]:
                     message_id=None,
                     webhook_event_id=webhook_event_id,
                     timestamp=timestamp,
+                    group_id=group_id,
                 )
             )
     return events

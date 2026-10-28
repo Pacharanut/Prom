@@ -181,7 +181,13 @@ async def test_menu_command(
     _, _, installation, _ = await _linked_setup(discord_harness)
     handler = discord_harness.handler
     await handler.handle_event(installation, _message_event("เมนู"), lambda m: _send_into(sent, m))
-    assert _component_ids(_last(sent)) == {"menu_create", "menu_my_tasks", "menu_update"}
+    assert _component_ids(_last(sent)) == {
+        "menu_create",
+        "menu_my_tasks",
+        "menu_update",
+        "menu_summary",
+        "menu_notif_settings",
+    }
 
 
 @pytest.mark.asyncio

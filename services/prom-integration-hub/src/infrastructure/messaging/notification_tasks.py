@@ -32,6 +32,7 @@ from src.adapters.persistence.channel_installation_repository import (
 from src.adapters.persistence.delegated_credential_repository import (
     PostgresDelegatedCredentialRepository,
 )
+from src.adapters.persistence.group_binding_repository import PostgresGroupBindingRepository
 from src.adapters.persistence.linked_identity_repository import PostgresLinkedIdentityRepository
 from src.adapters.persistence.notification_preference_repository import (
     PostgresNotificationPreferenceRepository,
@@ -46,12 +47,20 @@ from src.adapters.prom_api.client import HttpPromApiClient
 from src.adapters.redis.client import get_redis_client
 from src.adapters.redis.webhook_dedup import RedisWebhookDedupStore
 from src.adapters.secrets.fernet_provider import FernetSecretProvider
+from src.application.groups.notifier import GroupNotifier
+from src.application.notifications.summary import BuildDailySummary
 from src.application.notifications.use_cases import (
     CheckDueDateNotifications,
     FlushOutboundMessage,
     ProcessPromWebhookEvent,
 )
-from src.application.work_items.use_cases import ListMyWorkItems, ListProjects
+from src.application.work_items.use_cases import (
+    FindBlockedWorkItems,
+    ListMyWorkItems,
+    ListProjects,
+)
+from src.channels.group_copy import compose_group_event
+from src.channels.notification_copy import compose_daily_summary
 from src.channels.publisher_registry import MessagePublisherRegistry
 from src.domain.notifications.entities import OutboundMessageStatus
 from src.domain.webhooks.entities import WebhookEventStatus
@@ -130,6 +139,15 @@ def process_prom_webhook_event(
             if record is None:
                 return
 
+            group_notifier = GroupNotifier(
+                bindings=PostgresGroupBindingRepository(session),
+                installations=PostgresChannelInstallationRepository(session),
+                secrets_provider=_secret_provider(),
+                publisher=MessagePublisherRegistry(),
+                compose=compose_group_event,
+                audit_log=PostgresAuditLogRepository(session),
+                clock=SystemClock(),
+            )
             use_case = ProcessPromWebhookEvent(
                 workspace_connections=PostgresWorkspaceConnectionRepository(session),
                 linked_identities=PostgresLinkedIdentityRepository(session),
@@ -141,6 +159,7 @@ def process_prom_webhook_event(
                 prom_api_client=HttpPromApiClient(),
                 clock=SystemClock(),
                 schedule_send=schedule_debounced_send,
+                group_notifier=group_notifier,
             )
             try:
                 await use_case.execute(
@@ -240,32 +259,52 @@ def check_due_dates() -> None:
             prom_api_client = HttpPromApiClient()
             audit_log = PostgresAuditLogRepository(session)
             clock = SystemClock()
+            list_projects = ListProjects(
+                prom_instances=PostgresPromInstanceRepository(session),
+                delegated_credentials=PostgresDelegatedCredentialRepository(session),
+                secrets_provider=_secret_provider(),
+                prom_api_client=prom_api_client,
+                audit_log=audit_log,
+                clock=clock,
+            )
+            list_my_work_items = ListMyWorkItems(
+                prom_instances=PostgresPromInstanceRepository(session),
+                delegated_credentials=PostgresDelegatedCredentialRepository(session),
+                secrets_provider=_secret_provider(),
+                prom_api_client=prom_api_client,
+                audit_log=audit_log,
+                clock=clock,
+            )
+            notification_preferences = PostgresNotificationPreferenceRepository(session)
+            build_daily_summary = BuildDailySummary(
+                list_projects=list_projects,
+                list_my_work_items=list_my_work_items,
+                find_blocked_work_items=FindBlockedWorkItems(
+                    prom_instances=PostgresPromInstanceRepository(session),
+                    delegated_credentials=PostgresDelegatedCredentialRepository(session),
+                    secrets_provider=_secret_provider(),
+                    prom_api_client=prom_api_client,
+                    audit_log=audit_log,
+                    clock=clock,
+                ),
+                outbound_messages=PostgresOutboundMessageRepository(session),
+                notification_preferences=notification_preferences,
+                clock=clock,
+            )
             use_case = CheckDueDateNotifications(
                 linked_identities=PostgresLinkedIdentityRepository(session),
                 workspace_connections=PostgresWorkspaceConnectionRepository(session),
-                list_projects=ListProjects(
-                    prom_instances=PostgresPromInstanceRepository(session),
-                    delegated_credentials=PostgresDelegatedCredentialRepository(session),
-                    secrets_provider=_secret_provider(),
-                    prom_api_client=prom_api_client,
-                    audit_log=audit_log,
-                    clock=clock,
-                ),
-                list_my_work_items=ListMyWorkItems(
-                    prom_instances=PostgresPromInstanceRepository(session),
-                    delegated_credentials=PostgresDelegatedCredentialRepository(session),
-                    secrets_provider=_secret_provider(),
-                    prom_api_client=prom_api_client,
-                    audit_log=audit_log,
-                    clock=clock,
-                ),
-                notification_preferences=PostgresNotificationPreferenceRepository(session),
+                list_projects=list_projects,
+                list_my_work_items=list_my_work_items,
+                notification_preferences=notification_preferences,
                 installations=PostgresChannelInstallationRepository(session),
                 secrets_provider=_secret_provider(),
                 publisher=MessagePublisherRegistry(),
                 audit_log=audit_log,
                 clock=clock,
                 dedup_store=RedisWebhookDedupStore(get_redis_client()),
+                build_daily_summary=build_daily_summary,
+                compose_summary=compose_daily_summary,
             )
             await use_case.execute(correlation_id="scheduler")
             await session.commit()

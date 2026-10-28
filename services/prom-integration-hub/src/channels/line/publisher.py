@@ -23,3 +23,16 @@ class LineMessagePublisher(MessagePublisher):
             raise ChannelDeliveryFailedError(f"LineMessagePublisher cannot send to {channel_type}")
         access_token = credentials.get("channel_access_token", "")
         await push_message(access_token, channel_user_id, [{"type": "text", "text": text}])
+
+    async def send_group_message(
+        self,
+        channel_type: ChannelType,
+        credentials: dict[str, str],
+        group_id: str,
+        text: str,
+    ) -> None:
+        """Phase 2D: the same push API accepts a groupId/roomId as `to`."""
+        if channel_type is not ChannelType.LINE:
+            raise ChannelDeliveryFailedError(f"LineMessagePublisher cannot send to {channel_type}")
+        access_token = credentials.get("channel_access_token", "")
+        await push_message(access_token, group_id, [{"type": "text", "text": text}])

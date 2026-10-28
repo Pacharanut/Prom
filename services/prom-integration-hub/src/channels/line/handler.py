@@ -21,6 +21,10 @@ from src.application.account_linking.ports import (
     WorkspaceConnectionRepository,
 )
 from src.application.account_linking.use_cases import ConsumeLinkingCode
+from src.application.ai.assistant import AiAssistant, AssistantSession
+from src.application.ai.replies import Notice, NoticeReply, ShortcutReply
+from src.application.groups.service import GroupBindingService
+from src.application.notifications.panel import NotificationsPanel
 from src.application.prom_api.ports import PromApiClient
 from src.application.webhooks.ports import WebhookDedupStore
 from src.application.work_items.conversation import (
@@ -33,11 +37,14 @@ from src.application.work_items.conversation import (
     UpdateWorkItemFlow,
 )
 from src.application.work_items.ports import ConversationStateRepository
+from src.application.work_items.timeline import GetWorkItemTimeline
 from src.application.work_items.use_cases import ListMyWorkItems, ListProjects
+from src.channels import group_copy, timeline_copy
 from src.channels.line import messages as msg
 from src.channels.line.client import reply_message
 from src.channels.line.events import LineEvent, parse_line_webhook
 from src.channels.line.postback import decode_postback
+from src.domain.audit.entities import AuditOrigin
 from src.domain.identities.entities import LinkedIdentity
 from src.domain.integrations.entities import ChannelInstallation, ChannelType
 from src.domain.workspaces.entities import WorkspaceConnection
@@ -50,12 +57,24 @@ _WEBHOOK_DEDUP_TTL_SECONDS = 24 * 60 * 60
 
 _MENU_KEYWORDS = {"เมนู", "สวัสดี", "help", "menu", "hi", "hello"}
 _CANCEL_KEYWORDS = {"ยกเลิก", "cancel"}
+_SUMMARY_KEYWORDS = {"สรุปงาน", "สรุปงานวันนี้", "summary", "daily summary"}
+_NOTIFICATION_SETTINGS_KEYWORDS = {"ตั้งค่าแจ้งเตือน", "แจ้งเตือน", "notifications"}
+_HISTORY_KEYWORDS = {"ประวัติ", "ประวัติงาน", "history"}
 
-_PendingAction = Literal["create", "my_tasks", "update"]
+_PendingAction = Literal["create", "my_tasks", "update", "ai", "summary"]
 
 
 def _is_otp_candidate(text: str) -> bool:
     return text.strip().isdigit() and len(text.strip()) == 6
+
+
+def _origin(identity: LinkedIdentity) -> AuditOrigin:
+    """Phase 2E: every write made from this chat is audited with its channel."""
+    return AuditOrigin(
+        installation_id=identity.channel_installation_id,
+        channel_type=identity.channel_type,
+        channel_user_id=identity.channel_user_id,
+    )
 
 
 @dataclass
@@ -74,6 +93,16 @@ class LineWebhookHandler:
     update_flow: UpdateWorkItemFlow
     list_projects: ListProjects
     list_my_work_items: ListMyWorkItems
+    assistant: AiAssistant | None = None
+    """Phase 2. None (or AI switched off for the customer) means free text falls back to the
+    Phase 1 menu, exactly as before."""
+    notifications: NotificationsPanel | None = None
+    """Phase 2B: "สรุปงาน" and "ตั้งค่าแจ้งเตือน". None hides both (they fall back to the menu)."""
+    timeline: GetWorkItemTimeline | None = None
+    """Phase 2E: "ประวัติ" in the update menu."""
+    groups: GroupBindingService | None = None
+    """Phase 2D: group commands. Group events are never handled as private chats — with this
+    unset the bot simply stays silent in groups."""
 
     async def handle_payload(
         self,
@@ -82,7 +111,15 @@ class LineWebhookHandler:
         raw_payload: dict[str, object],
     ) -> None:
         for event in parse_line_webhook(raw_payload):
-            if event.event_type == "other" or event.user_id is None:
+            if event.group_id is not None:
+                if self.groups is None or event.event_type == "other":
+                    continue
+                if await self.dedup_store.mark_seen_if_new(
+                    event.dedup_key(), ttl_seconds=_WEBHOOK_DEDUP_TTL_SECONDS
+                ):
+                    await self._handle_group_event(installation, channel_access_token, event)
+                continue
+            if event.event_type in ("other", "join") or event.user_id is None:
                 continue
             is_new = await self.dedup_store.mark_seen_if_new(
                 event.dedup_key(), ttl_seconds=_WEBHOOK_DEDUP_TTL_SECONDS
@@ -191,8 +228,326 @@ class LineWebhookHandler:
             await self._start_or_defer(
                 installation, channel_access_token, event, identity, "update"
             )
+        elif lowered in _SUMMARY_KEYWORDS:
+            await self._start_or_defer(
+                installation, channel_access_token, event, identity, "summary"
+            )
+        elif lowered in _NOTIFICATION_SETTINGS_KEYWORDS:
+            await self._show_notification_settings(channel_access_token, event, identity)
+        elif lowered in _HISTORY_KEYWORDS and self.assistant is not None:
+            resolved = await self._resolve_workspace(
+                installation.id, identity.default_workspace_connection_id
+            )
+            if isinstance(resolved, list):
+                await self._reply(channel_access_token, event.reply_token, msg.build_menu_message())
+                return
+            session = self._ai_session(installation, event.user_id, identity, resolved)
+            reply = await self.assistant.history_for_focus(session)
+            await self._reply(channel_access_token, event.reply_token, msg.build_ai_reply(reply))
         else:
+            await self._handle_free_text(installation, channel_access_token, event, identity, text)
+
+    # --- Groups (Phase 2D) ---------------------------------------------------------------------
+
+    async def _handle_group_event(
+        self, installation: ChannelInstallation, channel_access_token: str, event: LineEvent
+    ) -> None:
+        """Only the explicit group commands get a reply — any other chatter in the group is
+        ignored, so the bot never spams a team conversation."""
+        assert event.group_id is not None and self.groups is not None
+        token, reply_token, group_id = channel_access_token, event.reply_token, event.group_id
+
+        if event.event_type == "join":
+            await self._reply(token, reply_token, msg.build_text(group_copy.join_text()))
+            return
+        if event.user_id is None:
+            return
+
+        command = (event.text or "").strip().lower() if event.event_type == "message" else ""
+        fields = (
+            decode_postback(event.postback_data)
+            if event.event_type == "postback" and event.postback_data
+            else {}
+        )
+        action = fields.get("action", "")
+        is_group_command = command in (
+            group_copy.BIND_KEYWORDS
+            | group_copy.SETTINGS_KEYWORDS
+            | group_copy.UNBIND_KEYWORDS
+            | group_copy.HELP_KEYWORDS
+        ) or action.startswith("group_")
+        if not is_group_command:
+            return
+        if command in group_copy.HELP_KEYWORDS:
+            await self._reply(token, reply_token, msg.build_text(group_copy.join_text()))
+            return
+
+        identity = await self.linked_identities.get_active_by_channel_user(
+            installation.id, event.user_id
+        )
+        if identity is None:
+            await self._reply(token, reply_token, msg.build_text(group_copy.not_linked_text()))
+            return
+        correlation_id = str(uuid4())
+
+        if command in group_copy.BIND_KEYWORDS:
+            resolved = await self._resolve_workspace(
+                installation.id, identity.default_workspace_connection_id
+            )
+            if isinstance(resolved, list):
+                if not resolved:
+                    await self._reply(
+                        token, reply_token, msg.build_text(group_copy.no_workspace_text())
+                    )
+                else:
+                    await self._reply(
+                        token, reply_token, msg.build_group_workspace_picker(resolved)
+                    )
+                return
+            projects = await self.groups.projects(identity, resolved, correlation_id)
+            await self._reply(
+                token, reply_token, msg.build_group_project_picker(projects, str(resolved.id))
+            )
+            return
+
+        if action == "group_ws":
+            workspace = await self._installation_workspace(installation, fields.get("value"))
+            if workspace is None:
+                return
+            projects = await self.groups.projects(identity, workspace, correlation_id)
+            await self._reply(
+                token, reply_token, msg.build_group_project_picker(projects, str(workspace.id))
+            )
+            return
+
+        if action == "group_bind":
+            workspace = await self._installation_workspace(installation, fields.get("ws"))
+            if workspace is None:
+                return
+            value = fields.get("value", "")
+            try:
+                binding = await self.groups.bind(
+                    installation=installation,
+                    group_id=group_id,
+                    identity=identity,
+                    workspace=workspace,
+                    project_id=None if value == "all" else value,
+                    correlation_id=correlation_id,
+                )
+            except DomainError:
+                await self._reply(
+                    token, reply_token, msg.build_text(group_copy.project_missing_text())
+                )
+                return
+            await self._reply(
+                token, reply_token, msg.build_group_settings(binding, just_bound=True)
+            )
+            return
+
+        if command in group_copy.UNBIND_KEYWORDS or action == "group_unbind":
+            removed = await self.groups.unbind(
+                installation=installation,
+                group_id=group_id,
+                identity=identity,
+                correlation_id=correlation_id,
+            )
+            text = group_copy.unbound_text() if removed else group_copy.not_bound_text()
+            await self._reply(token, reply_token, msg.build_text(text))
+            return
+
+        if action == "group_toggle":
+            current = await self.groups.toggle(
+                installation=installation,
+                group_id=group_id,
+                identity=identity,
+                event_value=fields.get("value", ""),
+                correlation_id=correlation_id,
+            )
+        else:  # settings keyword
+            current = await self.groups.binding(installation, group_id)
+        if current is None:
+            await self._reply(token, reply_token, msg.build_text(group_copy.not_bound_text()))
+            return
+        await self._reply(token, reply_token, msg.build_group_settings(current))
+
+    async def _installation_workspace(
+        self, installation: ChannelInstallation, workspace_connection_id: str | None
+    ) -> WorkspaceConnection | None:
+        """Only workspaces actually linked to this installation — a forged postback can't bind
+        a group to some other workspace."""
+        if not workspace_connection_id:
+            return None
+        links = await self.channel_installations.list_workspaces(installation.id)
+        if workspace_connection_id not in {str(link.workspace_connection_id) for link in links}:
+            return None
+        return await self.workspace_connections.get(UUID(workspace_connection_id))
+
+    # --- Notifications (Phase 2B) ------------------------------------------------------------
+
+    async def _show_notification_settings(
+        self, channel_access_token: str, event: LineEvent, identity: LinkedIdentity
+    ) -> None:
+        if self.notifications is None:
             await self._reply(channel_access_token, event.reply_token, msg.build_menu_message())
+            return
+        views = await self.notifications.preferences(identity.id)
+        await self._reply(
+            channel_access_token, event.reply_token, msg.build_preferences_panel(views)
+        )
+
+    async def _toggle_notification(
+        self,
+        channel_access_token: str,
+        event: LineEvent,
+        identity: LinkedIdentity,
+        event_type_value: str,
+        correlation_id: str,
+    ) -> None:
+        if self.notifications is None:
+            return
+        views = await self.notifications.toggle(identity.id, event_type_value, correlation_id)
+        await self._reply(
+            channel_access_token, event.reply_token, msg.build_preferences_panel(views)
+        )
+
+    async def _send_summary_now(
+        self,
+        channel_access_token: str,
+        event: LineEvent,
+        identity: LinkedIdentity,
+        workspace: WorkspaceConnection,
+    ) -> None:
+        if self.notifications is None:
+            await self._reply(channel_access_token, event.reply_token, msg.build_menu_message())
+            return
+        try:
+            summary = await self.notifications.summary_now(
+                identity, workspace.prom_workspace_slug, str(uuid4())
+            )
+        except DomainError as exc:
+            await self._reply(
+                channel_access_token, event.reply_token, msg.build_error_message(exc.error_code)
+            )
+            return
+        await self._reply(
+            channel_access_token, event.reply_token, msg.build_summary_message(summary)
+        )
+
+    # --- AI assistant (Phase 2) -------------------------------------------------------------------
+
+    async def _handle_free_text(
+        self,
+        installation: ChannelInstallation,
+        channel_access_token: str,
+        event: LineEvent,
+        identity: LinkedIdentity,
+        text: str,
+    ) -> None:
+        assert event.user_id is not None
+        if self.assistant is None or not await self.assistant.is_enabled(installation.customer_id):
+            await self._reply(channel_access_token, event.reply_token, msg.build_menu_message())
+            return
+
+        resolved = await self._resolve_workspace(
+            installation.id, identity.default_workspace_connection_id
+        )
+        if isinstance(resolved, list):
+            if not resolved:
+                await self._reply(
+                    channel_access_token,
+                    event.reply_token,
+                    {"type": "text", "text": "บัญชีนี้ยังไม่ได้เชื่อมกับ Workspace ใดเลย ติดต่อผู้ดูแลระบบ"},
+                )
+                return
+            state = ConversationState(
+                flow="workspace_select",
+                step="select",
+                data={"pending_action": "ai", "text": text},
+            )
+            await self.conversation_states.set(
+                installation.id, event.user_id, state, _CONVERSATION_TTL_SECONDS
+            )
+            await self._reply(
+                channel_access_token, event.reply_token, msg.build_workspace_picker(resolved)
+            )
+            return
+
+        await self._run_assistant(
+            installation, channel_access_token, event, identity, resolved, text
+        )
+
+    def _ai_session(
+        self,
+        installation: ChannelInstallation,
+        channel_user_id: str,
+        identity: LinkedIdentity,
+        workspace: WorkspaceConnection,
+    ) -> AssistantSession:
+        return AssistantSession(
+            customer_id=installation.customer_id,
+            channel_installation_id=installation.id,
+            channel_type=ChannelType.LINE,
+            channel_user_id=channel_user_id,
+            workspace_connection_id=workspace.id,
+            flow=FlowContext(
+                prom_instance_id=identity.prom_instance_id,
+                prom_user_id=identity.prom_user_id,
+                workspace_slug=workspace.prom_workspace_slug,
+                correlation_id=str(uuid4()),
+                origin=_origin(identity),
+            ),
+        )
+
+    async def _run_assistant(
+        self,
+        installation: ChannelInstallation,
+        channel_access_token: str,
+        event: LineEvent,
+        identity: LinkedIdentity,
+        workspace: WorkspaceConnection,
+        text: str,
+    ) -> None:
+        assert event.user_id is not None and self.assistant is not None
+        session = self._ai_session(installation, event.user_id, identity, workspace)
+        reply = await self.assistant.handle_text(session, text)
+        if isinstance(reply, ShortcutReply):
+            if reply.kind == "daily_summary":
+                await self._send_summary_now(channel_access_token, event, identity, workspace)
+            else:
+                await self._show_notification_settings(channel_access_token, event, identity)
+            return
+        await self._reply(channel_access_token, event.reply_token, msg.build_ai_reply(reply))
+
+    async def _handle_ai_postback(
+        self,
+        installation: ChannelInstallation,
+        channel_access_token: str,
+        event: LineEvent,
+        identity: LinkedIdentity,
+        action: str,
+        fields: dict[str, str],
+    ) -> None:
+        assert event.user_id is not None
+        state = await self.conversation_states.get(installation.id, event.user_id)
+        workspace_id = state.data.get("workspace_connection_id") if state else None
+        workspace = (
+            await self.workspace_connections.get(UUID(workspace_id)) if workspace_id else None
+        )
+        if self.assistant is None or state is None or state.flow != "ai" or workspace is None:
+            await self._reply(
+                channel_access_token,
+                event.reply_token,
+                msg.build_ai_reply(NoticeReply(Notice("session_expired"))),
+            )
+            return
+        session = self._ai_session(installation, event.user_id, identity, workspace)
+        if action == "ai_confirm":
+            reply = await self.assistant.confirm(
+                session, state, skip_suggestions=fields.get("value") == "plain"
+            )
+        else:
+            reply = await self.assistant.handle_choice(session, state, fields.get("value", ""))
+        await self._reply(channel_access_token, event.reply_token, msg.build_ai_reply(reply))
 
     # --- Account linking -------------------------------------------------------------------------
 
@@ -322,7 +677,11 @@ class LineWebhookHandler:
             prom_user_id=identity.prom_user_id,
             workspace_slug=workspace.prom_workspace_slug,
             correlation_id=str(uuid4()),
+            origin=_origin(identity),
         )
+        if action == "summary":
+            await self._send_summary_now(channel_access_token, event, identity, workspace)
+            return
         if action == "create":
             state = self.create_flow.start()
             state.data["workspace_connection_id"] = str(workspace.id)
@@ -374,6 +733,11 @@ class LineWebhookHandler:
         correlation_id: str,
     ) -> None:
         assert event.user_id is not None
+        if state.flow == "ai":
+            # A new message while a confirm/pick is pending is a new command, not an answer.
+            await self.conversation_states.clear(installation.id, event.user_id)
+            await self._handle_free_text(installation, channel_access_token, event, identity, text)
+            return
         ctx = await self._flow_context(identity, state, correlation_id)
 
         if state.flow == "create" and state.step == CreateFlowStep.TITLE:
@@ -398,6 +762,14 @@ class LineWebhookHandler:
                     channel_access_token, event.reply_token, msg.build_due_date_prompt()
                 )
                 return
+            workspace_connection_id = next_state.data.get("workspace_connection_id")
+            if workspace_connection_id:
+                next_state = await self.create_flow.suggest_tags(
+                    ctx,
+                    next_state,
+                    customer_id=installation.customer_id,
+                    workspace_connection_id=UUID(workspace_connection_id),
+                )
             await self.conversation_states.set(
                 installation.id, event.user_id, next_state, _CONVERSATION_TTL_SECONDS
             )
@@ -466,6 +838,9 @@ class LineWebhookHandler:
             state_name=state_name,
             assignee_name=assignee_name,
             due_date=state.data.get("due_date"),
+            labels=state.data.get("label_names") or [],
+            priority=state.data.get("auto_priority"),
+            tag_source=state.data.get("tag_source"),
         )
 
     async def _flow_context(
@@ -487,6 +862,7 @@ class LineWebhookHandler:
             prom_user_id=identity.prom_user_id,
             workspace_slug=ws.prom_workspace_slug,
             correlation_id=correlation_id,
+            origin=_origin(identity),
         )
 
     # --- Postback handling ------------------------------------------------------------------------
@@ -516,7 +892,33 @@ class LineWebhookHandler:
             )
             return
 
+        if action == "notif_settings":
+            await self._show_notification_settings(channel_access_token, event, identity)
+            return
+
+        if action == "notif_toggle":
+            await self._toggle_notification(
+                channel_access_token, event, identity, fields.get("value", ""), correlation_id
+            )
+            return
+
+        if action == "summary":
+            await self._start_or_defer(
+                installation, channel_access_token, event, identity, "summary"
+            )
+            return
+
+        if action in ("ai_confirm", "ai_pick"):
+            await self._handle_ai_postback(
+                installation, channel_access_token, event, identity, action, fields
+            )
+            return
+
         if action == "select_work_item":
+            if self.assistant is not None:
+                await self.assistant.remember_focus(
+                    installation.id, event.user_id, fields["project"], fields["value"]
+                )
             new_state = self.update_flow.start_for_work_item(fields["project"], fields["value"])
             await self.conversation_states.set(
                 installation.id, event.user_id, new_state, _CONVERSATION_TTL_SECONDS
@@ -569,6 +971,17 @@ class LineWebhookHandler:
             return
         pending_action: _PendingAction = state.data["pending_action"]
         await self.conversation_states.clear(installation.id, event.user_id)
+        if pending_action == "ai":
+            if self.assistant is not None:
+                await self._run_assistant(
+                    installation,
+                    channel_access_token,
+                    event,
+                    identity,
+                    ws,
+                    state.data.get("text", ""),
+                )
+            return
         await self._begin_action(
             installation, channel_access_token, event, identity, ws, pending_action
         )
@@ -621,7 +1034,10 @@ class LineWebhookHandler:
                 f"{state.data.get('title')}:{state.data.get('project_id')}"
             )
             work_item, was_replay = await self.create_flow.confirm(
-                ctx, state, idempotency_key=idempotency_key
+                ctx,
+                state,
+                idempotency_key=idempotency_key,
+                skip_suggestions=fields.get("value") == "plain",
             )
             await self.conversation_states.clear(installation.id, event.user_id)
 
@@ -695,6 +1111,28 @@ class LineWebhookHandler:
                 )
                 await self._reply(
                     channel_access_token, event.reply_token, msg.build_confirm_complete_prompt()
+                )
+            elif choice == "history":
+                if self.timeline is None:
+                    await self._reply(
+                        channel_access_token,
+                        event.reply_token,
+                        msg.build_text(timeline_copy.not_available_text()),
+                    )
+                    return
+                entries = await self.timeline.execute(
+                    prom_instance_id=ctx.prom_instance_id,
+                    prom_user_id=ctx.prom_user_id,
+                    workspace_slug=ctx.workspace_slug,
+                    project_id=state.data["project_id"],
+                    work_item_id=state.data["work_item_id"],
+                    limit=10,
+                    correlation_id=ctx.correlation_id,
+                )
+                await self._reply(
+                    channel_access_token,
+                    event.reply_token,
+                    msg.build_timeline_message(None, entries),
                 )
             return
 

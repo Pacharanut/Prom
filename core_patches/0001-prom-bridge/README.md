@@ -65,6 +65,36 @@ No `.env.example` file exists anywhere in this `plane/` checkout to update (conf
 Plane's own `CONTRIBUTING.md` generates `apps/api/.env` via `./setup.sh`, not a committed
 template). The four new vars are documented inline as comments in `settings/common.py` instead.
 
+### Phase 2 addition: AI Assistant settings relay (2026-10-26)
+
+Same pattern, same files, no new dependency:
+- `views.py` — `PromAiSettingsView` (GET/PUT) and `PromAiSettingsTestView` (POST), both
+  `WorkspaceOwnerPermission`, relaying to Hub's `/api/v1/customers/{PROM_CUSTOMER_ID}/ai-settings`
+  (+ `/test`). Only the fields Hub accepts are forwarded (`_pick`), so a browser can't smuggle a
+  different `customer_id`. Hub never returns the API key, so nothing secret flows back.
+- `urls.py` — `workspaces/<slug>/ai-settings/` and `workspaces/<slug>/ai-settings/test/`.
+- `tests.py` — `PromBridgeAiSettingsTests` (Member rejected, field filtering, test relay).
+
+Phase 2B (same day) added `PromConnectedAccountNotificationPreferencesView` (GET/PUT
+`connected-accounts/<id>/notification-preferences/`, IsAuthenticated). Like unlink, it first
+confirms the identity belongs to the signed-in user (`_reject_unless_owned`, factored out of the
+delete view) and forwards only the `preferences` object. 3 more tests; suite now 18/18.
+
+Phase 2C added `PromClassificationView` (GET/PUT `workspaces/<slug>/classification/`,
+WorkspaceOwnerPermission): it get-or-creates the Hub workspace connection for the slug (same call
+as `PromWorkspaceConnectionView`, factored into `_workspace_connection_id`), then relays only
+`is_enabled`/`use_ai_fallback`/`rules`. 2 more tests; suite 20/20.
+
+Phase 2E: `PromAuditLogView` now forwards the searchable-history filters (`channel_type`,
+`action`, `target_id`, `result_status`, `occurred_after/before`) from an allow-list. Suite 21/21.
+
+AI settings are per Prom customer (one per Plane instance), not per workspace — the same scope
+and the same Admin gate as integrations.
+
+Verified 2026-10-26: `python manage.py test plane.prom_bridge` inside `plane-api-1` — 15/15 pass
+(the first time this suite was actually executed; see the module docstring), and a live
+`HubClient` call from the container reached Hub and, through it, the NT AI Hub gateway.
+
 ## Verification
 
 Gate 8 Stage 2's build could not get a live Django environment running in its sandbox

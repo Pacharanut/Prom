@@ -58,4 +58,8 @@ docker compose -f deployments/docker-compose.yml config   # validate compose fil
   broadly, and they always report the failure rather than swallowing it.
 - External calls (Prom API, LINE, Discord) must have timeouts; only retry errors that are
   actually retryable (never validation/authentication/permission errors).
-- No AI/LLM dependencies or code in this service during Phase 1.
+- AI/LLM code (Phase 2, see `docs/architecture/04-adr-001-ai-intent-layer.md`) lives only in
+  `src/application/ai/` (framework-free: prompt, command schema, matching, dates, assistant) and
+  `src/adapters/ai/` (the OpenAI-compatible HTTP client). The LLM only turns text into a
+  `ParsedCommand`; it never produces ids and never writes. Every write goes through a
+  confirmation step and the existing work-item use cases. No vendor LLM SDKs — plain `httpx`.

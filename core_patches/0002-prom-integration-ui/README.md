@@ -86,6 +86,54 @@ Only English (`locales/en/`) was updated; other locales fall back to English via
 behaves — no functional gap, just untranslated strings in other languages until someone runs the
 project's normal translation pass.
 
+### Phase 2 addition: Settings → AI Assistant (2026-10-26)
+
+**New:**
+- `apps/web/app/(all)/[workspaceSlug]/(settings)/settings/(workspace)/ai-assistant/page.tsx` and
+  `header.tsx` — Admin-gated page, same structure as `integrations/`.
+- `apps/web/core/components/prom-integrations/ai-settings-form.tsx` — enable toggle, API base
+  URL, write-only API key (empty = keep; "Remove saved key"), model (free text, or a dropdown of
+  the gateway's chat models after "Test connection"), timeout, test result, example commands.
+
+**Existing files, additive:**
+- `packages/types/src/settings.ts` — `"ai-assistant"` added to `TWorkspaceSettingsTabs`.
+- `packages/constants/src/settings/workspace.ts` — `ai-assistant` entry, listed under DEVELOPER
+  after `integrations`.
+- `apps/web/core/components/settings/workspace/sidebar/item-icon.tsx` — `Sparkles` icon.
+- `apps/web/app/routes/core.ts` — the route.
+- `apps/web/core/services/prom-bridge.service.ts` — `getAiSettings`/`updateAiSettings`/
+  `testAiConnection` + types.
+- `packages/i18n/src/locales/en/workspace-settings.json` — `workspace_settings.settings.
+  ai_assistant` and `prom_ai_settings.*` (English only, like the rest of this patch; Plane ships
+  no Thai locale). Unlike `integrations`, these keys are new, not reused upstream ones.
+
+**Phase 2B (notification settings):** `components/prom-integrations/notification-preferences.tsx`
+(new — one switch per type, saves immediately), a *Notifications* button per account row in
+`connected-accounts.tsx`, two methods in `prom-bridge.service.ts`, and
+`account_settings.connected_accounts.notifications.*` in `en/settings.json`.
+
+**Phase 2C (auto-tagging):** `components/prom-integrations/auto-tagging-rules.tsx` (new — switches,
+a keyword / label / priority rule table with label-name suggestions from Plane's own
+`getWorkspaceIssueLabels`, save), rendered under the AI settings form on the AI Assistant page;
+two methods in `prom-bridge.service.ts`; `prom_auto_tagging.*` in `en/workspace-settings.json`.
+
+**Phase 2E (searchable history):** `audit-log-section.tsx` gains channel/result/action/target
+filters and Channel/Target columns (click a target to filter by it); `getAuditLog` accepts the
+filters; new `prom_integrations.audit_log.*` keys.
+
+**Placeholder fix (both phases):** Plane's i18n is ICU MessageFormat, so placeholders are
+`{name}`, not `{{name}}`. Gate 8 had used double braces in six strings (revoke/delete
+confirmations, linked-at, code expiry, unlink confirmation); they rendered literally (e.g.
+"permanently delete {{name}}?"). All fixed and checked by rendering through
+`intl-messageformat`.
+
+After pulling, rebuild the shared packages the web app consumes from `dist/`
+(`pnpm --filter @plane/types build && pnpm --filter @plane/constants build && pnpm --filter
+@plane/i18n build`) and restart the web dev server, or the new tab won't type-check / appear.
+
+Verified 2026-10-26: `tsc --noEmit` for `apps/web` passes; `oxlint` 0 warnings on the new files;
+the dev server compiles both new modules. Not yet clicked through in a logged-in browser.
+
 ## Scope decision: Connected Accounts "Connect" flow is a two-step picker
 
 The original directive sketched a single "Connect LINE"/"Connect Discord" action. In the real data

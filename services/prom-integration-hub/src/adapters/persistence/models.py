@@ -312,3 +312,80 @@ class OutboundMessageRecordModel(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AiSettingsModel(Base):
+    """Phase 2: one row per customer — see src/domain/ai/entities.py."""
+
+    __tablename__ = "ai_settings"
+    __table_args__ = (UniqueConstraint("customer_id", name="uq_ai_settings_customer_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("customers.id"), nullable=False
+    )
+    is_enabled: Mapped[bool] = mapped_column(nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    encrypted_api_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ClassificationSettingsModel(Base):
+    """Phase 2C: per-workspace auto-tagging switches. Absence of a row means the defaults
+    (enabled, AI fallback on, no rules) — see src/domain/classification/entities.py."""
+
+    __tablename__ = "classification_settings"
+
+    workspace_connection_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("workspace_connections.id"), primary_key=True
+    )
+    is_enabled: Mapped[bool] = mapped_column(nullable=False)
+    use_ai_fallback: Mapped[bool] = mapped_column(nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ClassificationRuleModel(Base):
+    __tablename__ = "classification_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    workspace_connection_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("workspace_connections.id"), nullable=False, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    keyword: Mapped[str] = mapped_column(String(100), nullable=False)
+    label_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    priority: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+
+class GroupBindingModel(Base):
+    """Phase 2D — see src/domain/groups/entities.py."""
+
+    __tablename__ = "group_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_installation_id", "group_id", name="uq_group_bindings_installation_group"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("customers.id"), nullable=False
+    )
+    channel_installation_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("channel_installations.id"), nullable=False
+    )
+    channel_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_connection_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("workspace_connections.id"), nullable=False, index=True
+    )
+    project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    project_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bound_by_prom_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    events: Mapped[str] = mapped_column(String(128), nullable=False)
+    """Comma-separated GroupEventType values."""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

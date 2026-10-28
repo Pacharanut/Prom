@@ -11,18 +11,26 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.adapters.ai.openai_compatible import OpenAICompatibleLlmClient
 from src.adapters.clock import SystemClock
+from src.adapters.persistence.ai_settings_repository import PostgresAiSettingsRepository
 from src.adapters.persistence.audit_log_repository import PostgresAuditLogRepository
 from src.adapters.persistence.channel_installation_repository import (
     PostgresChannelInstallationRepository,
 )
+from src.adapters.persistence.classification_repository import PostgresClassificationRepository
 from src.adapters.persistence.customer_repository import PostgresCustomerRepository
 from src.adapters.persistence.delegated_credential_repository import (
     PostgresDelegatedCredentialRepository,
 )
+from src.adapters.persistence.group_binding_repository import PostgresGroupBindingRepository
 from src.adapters.persistence.idempotency_repository import PostgresIdempotencyRepository
 from src.adapters.persistence.linked_identity_repository import PostgresLinkedIdentityRepository
 from src.adapters.persistence.linking_code_repository import PostgresLinkingCodeRepository
+from src.adapters.persistence.notification_preference_repository import (
+    PostgresNotificationPreferenceRepository,
+)
+from src.adapters.persistence.outbound_message_repository import PostgresOutboundMessageRepository
 from src.adapters.persistence.prom_instance_repository import PostgresPromInstanceRepository
 from src.adapters.persistence.webhook_event_repository import PostgresWebhookEventRepository
 from src.adapters.persistence.workspace_connection_repository import (
@@ -31,6 +39,7 @@ from src.adapters.persistence.workspace_connection_repository import (
 from src.adapters.prom_api.client import HttpPromApiClient
 from src.adapters.redis.client import get_redis_client
 from src.adapters.redis.conversation_store import RedisConversationStateRepository
+from src.adapters.redis.focus_store import RedisFocusStore
 from src.adapters.redis.rate_limiter import RedisRateLimiter
 from src.adapters.redis.webhook_dedup import RedisWebhookDedupStore
 from src.adapters.secrets.fernet_provider import FernetSecretProvider
@@ -48,17 +57,43 @@ from src.application.account_linking.use_cases import (
     UnlinkIdentity,
     UnlinkWorkspaceFromInstallation,
 )
+from src.application.ai.assistant import AiAssistant
+from src.application.ai.intent_parser import IntentParser
+from src.application.ai.ports import AiDefaults
+from src.application.ai.settings import (
+    GetAiSettings,
+    ResolveAiConnection,
+    TestAiConnection,
+    UpdateAiSettings,
+)
+from src.application.classification.classifier import AutoClassifier, SuggestClassification
+from src.application.classification.settings import (
+    GetClassificationSettings,
+    UpdateClassificationSettings,
+)
+from src.application.groups.service import GroupBindingService
+from src.application.notifications.panel import NotificationsPanel
+from src.application.notifications.preferences import (
+    GetNotificationPreferences,
+    UpdateNotificationPreferences,
+)
+from src.application.notifications.summary import BuildDailySummary
 from src.application.work_items.conversation import CreateWorkItemFlow, UpdateWorkItemFlow
+from src.application.work_items.timeline import GetWorkItemTimeline
 from src.application.work_items.use_cases import (
     AddComment,
     ChangeAssignee,
     CreateWorkItem,
+    FindBlockedWorkItems,
     GetWorkItem,
+    ListLabels,
     ListMyWorkItems,
     ListProjectMembers,
     ListProjects,
+    ListProjectWorkItems,
     ListStates,
     MarkComplete,
+    RescheduleWorkItem,
     SearchWorkItems,
     UpdateWorkItemState,
 )
@@ -379,6 +414,214 @@ def get_mark_complete(session: SessionDep) -> MarkComplete:
     )
 
 
+def get_reschedule_work_item(session: SessionDep) -> RescheduleWorkItem:
+    return RescheduleWorkItem(
+        prom_instances=PostgresPromInstanceRepository(session),
+        delegated_credentials=PostgresDelegatedCredentialRepository(session),
+        secrets_provider=get_secret_provider(),
+        prom_api_client=get_prom_api_client(),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_list_project_work_items(session: SessionDep) -> ListProjectWorkItems:
+    return ListProjectWorkItems(
+        prom_instances=PostgresPromInstanceRepository(session),
+        delegated_credentials=PostgresDelegatedCredentialRepository(session),
+        secrets_provider=get_secret_provider(),
+        prom_api_client=get_prom_api_client(),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+# --- AI assistant (Phase 2) -------------------------------------------------------------------
+
+
+def get_ai_defaults() -> AiDefaults:
+    settings = get_settings()
+    return AiDefaults(
+        is_enabled=settings.ai_enabled,
+        base_url=settings.nt_ai_hub_base_url,
+        api_key=settings.nt_ai_hub_key,
+        model=settings.nt_ai_hub_model,
+        timeout_seconds=settings.ai_timeout_seconds,
+    )
+
+
+def get_llm_client() -> OpenAICompatibleLlmClient:
+    return OpenAICompatibleLlmClient()
+
+
+def get_resolve_ai_connection(session: SessionDep) -> ResolveAiConnection:
+    return ResolveAiConnection(
+        ai_settings=PostgresAiSettingsRepository(session),
+        secrets_provider=get_secret_provider(),
+        defaults=get_ai_defaults(),
+    )
+
+
+def get_get_ai_settings(session: SessionDep) -> GetAiSettings:
+    return GetAiSettings(
+        customers=PostgresCustomerRepository(session),
+        ai_settings=PostgresAiSettingsRepository(session),
+        defaults=get_ai_defaults(),
+    )
+
+
+def get_update_ai_settings(session: SessionDep) -> UpdateAiSettings:
+    return UpdateAiSettings(
+        customers=PostgresCustomerRepository(session),
+        ai_settings=PostgresAiSettingsRepository(session),
+        secrets_provider=get_secret_provider(),
+        defaults=get_ai_defaults(),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_test_ai_connection(session: SessionDep) -> TestAiConnection:
+    llm_client = get_llm_client()
+    return TestAiConnection(
+        customers=PostgresCustomerRepository(session),
+        ai_settings=PostgresAiSettingsRepository(session),
+        secrets_provider=get_secret_provider(),
+        defaults=get_ai_defaults(),
+        llm_client=llm_client,
+        intent_parser=IntentParser(llm_client=llm_client),
+        clock=SystemClock(),
+    )
+
+
+def get_get_work_item_timeline(session: SessionDep) -> GetWorkItemTimeline:
+    return GetWorkItemTimeline(
+        prom_instances=PostgresPromInstanceRepository(session),
+        delegated_credentials=PostgresDelegatedCredentialRepository(session),
+        secrets_provider=get_secret_provider(),
+        prom_api_client=get_prom_api_client(),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_auto_classifier(session: SessionDep) -> AutoClassifier:
+    return AutoClassifier(
+        list_labels=ListLabels(
+            prom_instances=PostgresPromInstanceRepository(session),
+            delegated_credentials=PostgresDelegatedCredentialRepository(session),
+            secrets_provider=get_secret_provider(),
+            prom_api_client=get_prom_api_client(),
+            audit_log=PostgresAuditLogRepository(session),
+            clock=SystemClock(),
+        ),
+        suggest=SuggestClassification(
+            classification=PostgresClassificationRepository(session),
+            llm_client=get_llm_client(),
+        ),
+        resolve_connection=get_resolve_ai_connection(session),
+    )
+
+
+def get_get_classification_settings(session: SessionDep) -> GetClassificationSettings:
+    return GetClassificationSettings(
+        workspace_connections=PostgresWorkspaceConnectionRepository(session),
+        classification=PostgresClassificationRepository(session),
+    )
+
+
+def get_update_classification_settings(session: SessionDep) -> UpdateClassificationSettings:
+    return UpdateClassificationSettings(
+        workspace_connections=PostgresWorkspaceConnectionRepository(session),
+        classification=PostgresClassificationRepository(session),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_ai_assistant(session: SessionDep) -> AiAssistant:
+    redis_client = get_redis_client()
+    return AiAssistant(
+        resolve_connection=get_resolve_ai_connection(session),
+        intent_parser=IntentParser(llm_client=get_llm_client()),
+        conversation_states=RedisConversationStateRepository(redis_client),
+        focus_store=RedisFocusStore(redis_client),
+        rate_limiter=get_rate_limiter(),
+        prom_instances=PostgresPromInstanceRepository(session),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+        list_projects=get_list_projects(session),
+        list_states=get_list_states(session),
+        list_project_members=get_list_project_members(session),
+        list_my_work_items=get_list_my_work_items(session),
+        list_project_work_items=get_list_project_work_items(session),
+        search_work_items=get_search_work_items(session),
+        get_work_item=get_get_work_item(session),
+        create_work_item=get_create_work_item(session),
+        update_work_item_state=get_update_work_item_state(session),
+        mark_complete=get_mark_complete(session),
+        change_assignee=get_change_assignee(session),
+        reschedule_work_item=get_reschedule_work_item(session),
+        add_comment=get_add_comment(session),
+        auto_classifier=get_auto_classifier(session),
+        get_timeline=get_get_work_item_timeline(session),
+    )
+
+
+# --- Notifications (Phase 2B) -----------------------------------------------------------------
+
+
+def get_get_notification_preferences(session: SessionDep) -> GetNotificationPreferences:
+    return GetNotificationPreferences(
+        linked_identities=PostgresLinkedIdentityRepository(session),
+        notification_preferences=PostgresNotificationPreferenceRepository(session),
+    )
+
+
+def get_update_notification_preferences(session: SessionDep) -> UpdateNotificationPreferences:
+    return UpdateNotificationPreferences(
+        linked_identities=PostgresLinkedIdentityRepository(session),
+        notification_preferences=PostgresNotificationPreferenceRepository(session),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_find_blocked_work_items(session: SessionDep) -> FindBlockedWorkItems:
+    return FindBlockedWorkItems(
+        prom_instances=PostgresPromInstanceRepository(session),
+        delegated_credentials=PostgresDelegatedCredentialRepository(session),
+        secrets_provider=get_secret_provider(),
+        prom_api_client=get_prom_api_client(),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
+def get_notifications_panel(session: SessionDep) -> NotificationsPanel:
+    return NotificationsPanel(
+        get_preferences=get_get_notification_preferences(session),
+        update_preferences=get_update_notification_preferences(session),
+        build_daily_summary=BuildDailySummary(
+            list_projects=get_list_projects(session),
+            list_my_work_items=get_list_my_work_items(session),
+            find_blocked_work_items=get_find_blocked_work_items(session),
+            outbound_messages=PostgresOutboundMessageRepository(session),
+            notification_preferences=PostgresNotificationPreferenceRepository(session),
+            clock=SystemClock(),
+        ),
+    )
+
+
+def get_group_binding_service(session: SessionDep) -> GroupBindingService:
+    return GroupBindingService(
+        bindings=PostgresGroupBindingRepository(session),
+        list_projects=get_list_projects(session),
+        audit_log=PostgresAuditLogRepository(session),
+        clock=SystemClock(),
+    )
+
+
 # --- LINE webhook (Gate 5) --------------------------------------------------------------------
 
 
@@ -388,6 +631,7 @@ def get_line_webhook_handler(session: SessionDep) -> LineWebhookHandler:
         list_states=get_list_states(session),
         list_project_members=get_list_project_members(session),
         create_work_item=get_create_work_item(session),
+        auto_classifier=get_auto_classifier(session),
     )
     update_flow = UpdateWorkItemFlow(
         list_states=get_list_states(session),
@@ -412,4 +656,8 @@ def get_line_webhook_handler(session: SessionDep) -> LineWebhookHandler:
         update_flow=update_flow,
         list_projects=get_list_projects(session),
         list_my_work_items=get_list_my_work_items(session),
+        assistant=get_ai_assistant(session),
+        notifications=get_notifications_panel(session),
+        groups=get_group_binding_service(session),
+        timeline=get_get_work_item_timeline(session),
     )

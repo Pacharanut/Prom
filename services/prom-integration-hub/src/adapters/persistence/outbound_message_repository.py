@@ -8,6 +8,7 @@ in-query instead of relying on a partial unique index the way LinkedIdentity doe
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -55,6 +56,20 @@ class PostgresOutboundMessageRepository(OutboundMessageRepository):
     async def get(self, record_id: UUID) -> OutboundMessageRecord | None:
         model = await self._session.get(OutboundMessageRecordModel, record_id)
         return _to_domain(model) if model is not None else None
+
+    async def list_created_since(
+        self, linked_identity_id: UUID, since: datetime
+    ) -> list[OutboundMessageRecord]:
+        stmt = (
+            select(OutboundMessageRecordModel)
+            .where(
+                OutboundMessageRecordModel.linked_identity_id == linked_identity_id,
+                OutboundMessageRecordModel.created_at >= since,
+            )
+            .order_by(OutboundMessageRecordModel.created_at.desc())
+        )
+        models = (await self._session.execute(stmt)).scalars().all()
+        return [_to_domain(m) for m in models]
 
     async def add(self, record: OutboundMessageRecord) -> None:
         self._session.add(

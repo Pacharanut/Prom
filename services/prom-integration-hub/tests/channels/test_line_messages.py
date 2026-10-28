@@ -18,12 +18,12 @@ def _postback_datas(message: dict[str, object]) -> list[str]:
     return [item["action"]["data"] for item in items]  # type: ignore[index]
 
 
-def test_menu_message_has_three_options() -> None:
+def test_menu_message_has_five_options() -> None:
     message = msg.build_menu_message()
     assert message["type"] == "text"
     datas = _postback_datas(message)
     actions = {decode_postback(d)["action"] for d in datas}
-    assert actions == {"create", "my_tasks", "update"}
+    assert actions == {"create", "my_tasks", "update", "summary", "notif_settings"}
 
 
 def test_project_picker_encodes_project_ids() -> None:
@@ -120,12 +120,12 @@ def test_my_tasks_list_empty() -> None:
     assert "quickReply" not in message
 
 
-def test_update_action_menu_has_four_actions_plus_cancel() -> None:
+def test_update_action_menu_has_five_actions_plus_cancel() -> None:
     message = msg.build_update_action_menu()
     decoded = [decode_postback(d) for d in _postback_datas(message)]
     assert {f["action"] for f in decoded} == {"select_update_action", "cancel"}
     values = {f["value"] for f in decoded if f["action"] == "select_update_action"}
-    assert values == {"state", "comment", "assignee", "complete"}
+    assert values == {"state", "comment", "assignee", "complete", "history"}
 
 
 def test_linking_success_message_includes_display_name() -> None:

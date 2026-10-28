@@ -7,9 +7,24 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 
-from apps.api.dependencies import get_unlink_identity, require_service_token
-from apps.api.schemas import LinkedIdentityResponse
+from apps.api.dependencies import (
+    get_get_notification_preferences,
+    get_unlink_identity,
+    get_update_notification_preferences,
+    require_service_token,
+)
+from apps.api.schemas import (
+    LinkedIdentityResponse,
+    NotificationPreferenceItem,
+    NotificationPreferencesResponse,
+    NotificationPreferencesUpdateRequest,
+)
 from src.application.account_linking.use_cases import UnlinkIdentity
+from src.application.notifications.preferences import (
+    GetNotificationPreferences,
+    NotificationPreferenceView,
+    UpdateNotificationPreferences,
+)
 from src.infrastructure.observability.logging import get_correlation_id
 
 router = APIRouter(
@@ -38,3 +53,45 @@ async def unlink_identity(
         linked_at=identity.linked_at,
         unlinked_at=identity.unlinked_at,
     )
+
+
+def _preferences_response(
+    identity_id: UUID, views: list[NotificationPreferenceView]
+) -> NotificationPreferencesResponse:
+    return NotificationPreferencesResponse(
+        linked_identity_id=identity_id,
+        preferences=[
+            NotificationPreferenceItem(event_type=v.event_type, enabled=v.enabled) for v in views
+        ],
+    )
+
+
+@router.get(
+    "/{identity_id}/notification-preferences", response_model=NotificationPreferencesResponse
+)
+async def get_notification_preferences(
+    identity_id: UUID,
+    use_case: Annotated[GetNotificationPreferences, Depends(get_get_notification_preferences)],
+) -> NotificationPreferencesResponse:
+    """Phase 2B. Like DELETE above, Hub trusts its caller here — prom_bridge checks the identity
+    belongs to the signed-in Plane user before relaying."""
+    views = await use_case.execute(linked_identity_id=identity_id)
+    return _preferences_response(identity_id, views)
+
+
+@router.put(
+    "/{identity_id}/notification-preferences", response_model=NotificationPreferencesResponse
+)
+async def update_notification_preferences(
+    identity_id: UUID,
+    body: NotificationPreferencesUpdateRequest,
+    use_case: Annotated[
+        UpdateNotificationPreferences, Depends(get_update_notification_preferences)
+    ],
+) -> NotificationPreferencesResponse:
+    views = await use_case.execute(
+        linked_identity_id=identity_id,
+        changes=dict(body.preferences),
+        correlation_id=get_correlation_id() or "unknown",
+    )
+    return _preferences_response(identity_id, views)

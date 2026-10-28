@@ -7,8 +7,23 @@ Phase 1 scope with no visual-design requirement.
 
 from __future__ import annotations
 
+from src.application.ai.replies import (
+    AssistantReply,
+    ChoiceReply,
+    ConfirmReply,
+    DoneReply,
+    FallbackReply,
+    NoticeReply,
+    ShortcutReply,
+    TimelineReply,
+)
+from src.application.notifications.preferences import NotificationPreferenceView
+from src.application.notifications.summary import DailySummary
 from src.application.prom_api.ports import PromUserProfile
+from src.application.work_items.timeline import TimelineEntry
+from src.channels import ai_copy, group_copy, notification_copy, timeline_copy
 from src.channels.line.postback import encode_postback
+from src.domain.groups.entities import GroupBinding, GroupEventType
 from src.domain.work_items.entities import (
     ProjectMemberRef,
     ProjectRef,
@@ -49,9 +64,13 @@ def build_menu_message() -> dict[str, object]:
         _quick_reply_item("สร้างงาน", encode_postback("create")),
         _quick_reply_item("งานของฉัน", encode_postback("my_tasks")),
         _quick_reply_item("อัปเดต", encode_postback("update")),
+        _quick_reply_item("สรุปงาน", encode_postback("summary")),
+        _quick_reply_item("ตั้งค่าแจ้งเตือน", encode_postback("notif_settings")),
     ]
     return _text_with_quick_reply(
-        "สวัสดีค่ะ 👋 เลือกเมนูที่ต้องการได้เลย:\nA. สร้างงาน\nB. งานของฉัน\nC. อัปเดต", items
+        "สวัสดีค่ะ 👋 เลือกเมนูที่ต้องการได้เลย:\nA. สร้างงาน\nB. งานของฉัน\nC. อัปเดต"
+        "\nD. สรุปงาน\nE. ตั้งค่าแจ้งเตือน",
+        items,
     )
 
 
@@ -102,6 +121,9 @@ def build_review_card(
     state_name: str | None,
     assignee_name: str | None,
     due_date: str | None,
+    labels: list[str] | None = None,
+    priority: str | None = None,
+    tag_source: str | None = None,
 ) -> dict[str, object]:
     lines = [
         "ตรวจสอบข้อมูลก่อนสร้างงาน:",
@@ -110,11 +132,14 @@ def build_review_card(
         f"สถานะ: {state_name or '(ค่าเริ่มต้น)'}",
         f"ผู้รับผิดชอบ: {assignee_name or '(ไม่ระบุ)'}",
         f"กำหนดส่ง: {due_date or '(ไม่ระบุ)'}",
+        *ai_copy.tagging_lines(labels or [], priority, tag_source, priority_is_explicit=False),
     ]
-    items = [
-        _quick_reply_item("ยืนยัน", encode_postback("confirm")),
-        _quick_reply_item("ยกเลิก", encode_postback("cancel")),
-    ]
+    items = [_quick_reply_item("ยืนยัน", encode_postback("confirm"))]
+    if labels or priority:
+        items.append(
+            _quick_reply_item("ยืนยัน (ไม่ใส่ tag)", encode_postback("confirm", value="plain"))
+        )
+    items.append(_quick_reply_item("ยกเลิก", encode_postback("cancel")))
     return _text_with_quick_reply("\n".join(lines), items)
 
 
@@ -193,9 +218,19 @@ def build_update_action_menu() -> dict[str, object]:
         _quick_reply_item(
             "Mark Complete", encode_postback("select_update_action", value="complete")
         ),
+        _quick_reply_item("ประวัติ", encode_postback("select_update_action", value="history")),
         _quick_reply_item("ยกเลิก", encode_postback("cancel")),
     ]
     return _text_with_quick_reply("เลือกการอัปเดต:", items)
+
+
+def build_timeline_message(
+    target_label: str | None, entries: list[TimelineEntry]
+) -> dict[str, object]:
+    """Phase 2E: the history, with the update menu still attached so the user can carry on."""
+    menu = build_update_action_menu()
+    menu["text"] = timeline_copy.timeline_text(target_label, entries) + "\n\nเลือกการอัปเดต:"
+    return menu
 
 
 def build_comment_prompt() -> dict[str, object]:
@@ -218,3 +253,116 @@ def build_update_success_message(*, action: str) -> dict[str, object]:
         "complete": "ทำเครื่องหมายว่าเสร็จสิ้นสำเร็จ",
     }
     return {"type": "text", "text": f"✅ {labels.get(action, 'อัปเดตสำเร็จ')}"}
+
+
+# --- AI assistant (Phase 2) -------------------------------------------------------------------
+
+
+def build_ai_reply(reply: AssistantReply) -> dict[str, object]:
+    """Renders any AiAssistant reply as one LINE message. Copy comes from ai_copy.py (shared
+    with Discord); this function only adds the Quick Reply buttons."""
+    if isinstance(reply, ShortcutReply):
+        return build_menu_message()  # handlers open the panel themselves; never reached normally
+    if isinstance(reply, TimelineReply):
+        return {
+            "type": "text",
+            "text": timeline_copy.timeline_text(reply.target_label, reply.entries),
+        }
+    if isinstance(reply, FallbackReply):
+        menu = build_menu_message()
+        hint = ai_copy.fallback_text(reply)
+        if hint:
+            menu["text"] = f"{hint}\n\n{menu['text']}"
+        return menu
+    if isinstance(reply, NoticeReply):
+        return {"type": "text", "text": ai_copy.notice_text(reply.notice)}
+    if isinstance(reply, DoneReply):
+        return {"type": "text", "text": ai_copy.done_text(reply)}
+    if isinstance(reply, ConfirmReply):
+        items = [_quick_reply_item("ยืนยัน", encode_postback("ai_confirm"))]
+        if reply.can_skip_suggestions:
+            items.append(
+                _quick_reply_item("ยืนยัน (ไม่ใส่ tag)", encode_postback("ai_confirm", value="plain"))
+            )
+        items.append(_quick_reply_item("ยกเลิก", encode_postback("cancel")))
+        return _text_with_quick_reply(ai_copy.confirm_text(reply), items)
+    if isinstance(reply, ChoiceReply):
+        items = [
+            _quick_reply_item(option.label, encode_postback("ai_pick", value=option.value))
+            for option in reply.options[: _QUICK_REPLY_MAX_ITEMS - 1]
+        ]
+        items.append(_quick_reply_item("ยกเลิก", encode_postback("cancel")))
+        return _text_with_quick_reply(ai_copy.choice_prompt(reply.kind, reply.subject), items)
+    rows = reply.rows[:_QUICK_REPLY_MAX_ITEMS]
+    items = [
+        _quick_reply_item(
+            row.label,
+            encode_postback("select_work_item", value=row.work_item_id, project=row.project_id),
+        )
+        for row in rows
+    ]
+    return _text_with_quick_reply(ai_copy.list_text(reply, max_rows=_QUICK_REPLY_MAX_ITEMS), items)
+
+
+# --- Notifications (Phase 2B) -----------------------------------------------------------------
+
+
+def build_preferences_panel(views: list[NotificationPreferenceView]) -> dict[str, object]:
+    items = [
+        _quick_reply_item(
+            notification_copy.toggle_label(view),
+            encode_postback("notif_toggle", value=view.event_type.value),
+        )
+        for view in views
+    ]
+    return _text_with_quick_reply(notification_copy.preferences_text(views), items)
+
+
+def build_summary_message(summary: DailySummary) -> dict[str, object]:
+    return {"type": "text", "text": notification_copy.compose_daily_summary(summary)}
+
+
+# --- Groups (Phase 2D) ------------------------------------------------------------------------
+
+
+def build_text(text: str) -> dict[str, object]:
+    return {"type": "text", "text": text}
+
+
+def build_group_workspace_picker(workspaces: list[WorkspaceConnection]) -> dict[str, object]:
+    items = [
+        _quick_reply_item(ws.name, encode_postback("group_ws", value=str(ws.id)))
+        for ws in workspaces[:_QUICK_REPLY_MAX_ITEMS]
+    ]
+    return _text_with_quick_reply(group_copy.choose_workspace_text(), items)
+
+
+def build_group_project_picker(
+    projects: list[ProjectRef], workspace_connection_id: str
+) -> dict[str, object]:
+    items = [
+        _quick_reply_item(
+            group_copy.ALL_PROJECTS_LABEL,
+            encode_postback("group_bind", value="all", ws=workspace_connection_id),
+        )
+    ]
+    items += [
+        _quick_reply_item(
+            p.name, encode_postback("group_bind", value=p.id, ws=workspace_connection_id)
+        )
+        for p in projects
+    ]
+    return _text_with_quick_reply(group_copy.choose_project_text(), items)
+
+
+def build_group_settings(binding: GroupBinding, *, just_bound: bool = False) -> dict[str, object]:
+    items = [
+        _quick_reply_item(
+            group_copy.toggle_label(binding, event_type),
+            encode_postback("group_toggle", value=event_type.value),
+        )
+        for event_type in GroupEventType
+    ]
+    items.append(_quick_reply_item("ยกเลิกผูกกลุ่ม", encode_postback("group_unbind")))
+    text = group_copy.bound_text(binding) if just_bound else group_copy.settings_text(binding)
+    return _text_with_quick_reply(text, items)

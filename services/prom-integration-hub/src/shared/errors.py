@@ -175,3 +175,34 @@ class InstallationHasLinkedIdentitiesError(DomainError):
     """
 
     error_code = "INSTALLATION_HAS_LINKED_IDENTITIES"
+
+
+# --- AI layer (Phase 2, docs/architecture/04-adr-001-ai-intent-layer.md) -------------------
+
+
+class AiNotConfiguredError(DomainError):
+    """No usable LLM gateway for this customer: AI is switched off, or no base URL / API key
+    is set in either the customer's AiSettings or the Hub's NT_AI_HUB_* defaults."""
+
+    error_code = "AI_NOT_CONFIGURED"
+
+
+class AiUnavailableError(DomainError):
+    """The gateway could not be reached, timed out, returned 5xx, or the configured base URL
+    answered with something that isn't the API (e.g. a web page)."""
+
+    error_code = "AI_UNAVAILABLE"
+
+
+class AiCredentialInvalidError(DomainError):
+    error_code = "AI_CREDENTIAL_INVALID"
+
+
+class AiResponseInvalidError(DomainError):
+    """The gateway answered, but not with a JSON object matching the command schema."""
+
+    error_code = "AI_RESPONSE_INVALID"
+
+
+class AiSettingsInvalidError(DomainError):
+    error_code = "AI_SETTINGS_INVALID"

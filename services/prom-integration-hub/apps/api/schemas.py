@@ -5,6 +5,7 @@ domain/application) — these translate to/from the framework-free dataclasses i
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ from src.domain.customers.entities import CustomerStatus
 from src.domain.identities.entities import IdentityStatus
 from src.domain.instances.entities import InstanceStatus
 from src.domain.integrations.entities import ChannelType, InstallationStatus
+from src.domain.notifications.entities import NotificationEventType
 
 
 class CustomerCreateRequest(BaseModel):
@@ -268,3 +270,107 @@ class WorkItemSearchResultResponse(BaseModel):
     sequence_id: int
     project_id: str
     project_identifier: str
+
+
+# --- AI settings (Phase 2) --------------------------------------------------------------------
+
+
+class AiSettingsResponse(BaseModel):
+    """Never contains the API key itself — only whether one is set and where it comes from."""
+
+    customer_id: UUID
+    is_enabled: bool
+    base_url: str | None
+    model: str
+    timeout_seconds: int
+    has_api_key: bool
+    api_key_source: Literal["custom", "environment"] | None
+    is_customized: bool
+
+
+class AiSettingsUpdateRequest(BaseModel):
+    is_enabled: bool
+    base_url: str
+    model: str
+    timeout_seconds: int = 15
+    api_key: str | None = None
+    """Omit (or null) to keep the stored key; a non-empty value replaces it."""
+    clear_api_key: bool = False
+    """True removes the stored key so the Hub's NT_AI_HUB_KEY default applies again."""
+
+
+class AiSettingsTestRequest(BaseModel):
+    """Every field optional: omitted ones fall back to the saved settings / Hub defaults, so the
+    settings page can test edits before saving them."""
+
+    base_url: str | None = None
+    model: str | None = None
+    timeout_seconds: int | None = None
+    api_key: str | None = None
+
+
+class AiConnectionTestResponse(BaseModel):
+    is_ok: bool
+    models: list[str]
+    model_found: bool
+    latency_ms: int | None
+    sample_intent: str | None
+    error_code: str | None
+    error_message: str | None
+
+
+# --- Notification preferences (Phase 2B) ------------------------------------------------------
+
+
+class NotificationPreferenceItem(BaseModel):
+    event_type: NotificationEventType
+    enabled: bool
+
+
+class NotificationPreferencesResponse(BaseModel):
+    linked_identity_id: UUID
+    preferences: list[NotificationPreferenceItem]
+
+
+class NotificationPreferencesUpdateRequest(BaseModel):
+    """Only the listed event types change; omitted ones keep their current setting."""
+
+    preferences: dict[NotificationEventType, bool]
+
+
+# --- Auto-tagging (Phase 2C) ------------------------------------------------------------------
+
+
+class ClassificationRuleItem(BaseModel):
+    keyword: str
+    label_name: str | None = None
+    priority: Literal["urgent", "high", "medium", "low", "none"] | None = None
+
+
+class ClassificationSettingsResponse(BaseModel):
+    workspace_connection_id: UUID
+    is_enabled: bool
+    use_ai_fallback: bool
+    rules: list[ClassificationRuleItem]
+    is_customized: bool
+
+
+class ClassificationSettingsUpdateRequest(BaseModel):
+    """Replaces the whole rule list (the settings page edits it as one table)."""
+
+    is_enabled: bool = True
+    use_ai_fallback: bool = True
+    rules: list[ClassificationRuleItem] = []
+
+
+# --- Timeline (Phase 2E) ----------------------------------------------------------------------
+
+
+class TimelineEntryResponse(BaseModel):
+    at: datetime
+    source: Literal["line", "discord", "hub", "plane"]
+    kind: str
+    actor_id: str | None
+    actor_name: str | None
+    old_value: str | None
+    new_value: str | None

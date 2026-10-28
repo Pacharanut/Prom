@@ -18,6 +18,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
+from src.application.classification.classifier import AutoClassifier
 from src.application.work_items.use_cases import (
     AddComment,
     ChangeAssignee,
@@ -28,6 +29,7 @@ from src.application.work_items.use_cases import (
     MarkComplete,
     UpdateWorkItemState,
 )
+from src.domain.audit.entities import AuditOrigin
 from src.domain.work_items.entities import ProjectMemberRef, ProjectRef, WorkItem, WorkItemState
 
 
@@ -64,11 +66,12 @@ workspace with more than 10 projects will not show all of them in the create-flo
 
 @dataclass
 class ConversationState:
-    flow: Literal["create", "update", "workspace_select"]
+    flow: Literal["create", "update", "workspace_select", "ai"]
     """"workspace_select" is not a real work-item flow — it's the channel-agnostic interstitial
     state used while a user with more than one linked workspace is asked to pick one for this
     session (src/channels/line/handler.py._start_or_defer). Modeled here rather than as
-    channel-local state so Gate 6 doesn't have to reinvent it."""
+    channel-local state so Gate 6 doesn't have to reinvent it. "ai" is the AI assistant's
+    pick/confirm state (src/application/ai/assistant.py)."""
     step: str
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -98,6 +101,8 @@ class FlowContext:
     prom_user_id: str
     workspace_slug: str
     correlation_id: str
+    origin: AuditOrigin | None = None
+    """Phase 2E: the chat this turn came from, recorded on every write's audit entry."""
 
 
 @dataclass
@@ -106,6 +111,8 @@ class CreateWorkItemFlow:
     list_states: ListStates
     list_project_members: ListProjectMembers
     create_work_item: CreateWorkItem
+    auto_classifier: AutoClassifier | None = None
+    """Phase 2C — see suggest_tags."""
 
     def start(self) -> ConversationState:
         return ConversationState(flow="create", step=CreateFlowStep.TITLE)
@@ -183,11 +190,51 @@ class CreateWorkItemFlow:
             data={**state.data, "due_date": due_date.isoformat() if due_date else None},
         )
 
+    async def suggest_tags(
+        self,
+        ctx: FlowContext,
+        state: ConversationState,
+        *,
+        customer_id: UUID,
+        workspace_connection_id: UUID,
+    ) -> ConversationState:
+        """Phase 2C: attach auto-tagging suggestions before the REVIEW step is shown. A no-op
+        when no classifier is wired (Phase 1 behaviour)."""
+        if self.auto_classifier is None:
+            return state
+        suggestion = await self.auto_classifier.classify(
+            customer_id=customer_id,
+            workspace_connection_id=workspace_connection_id,
+            prom_instance_id=ctx.prom_instance_id,
+            prom_user_id=ctx.prom_user_id,
+            workspace_slug=ctx.workspace_slug,
+            project_id=state.data["project_id"],
+            title=state.data["title"],
+            correlation_id=ctx.correlation_id,
+        )
+        return ConversationState(
+            flow=state.flow,
+            step=state.step,
+            data={
+                **state.data,
+                "label_ids": suggestion.label_ids,
+                "label_names": suggestion.label_names,
+                "auto_priority": suggestion.priority.value if suggestion.priority else None,
+                "tag_source": suggestion.source,
+            },
+        )
+
     async def confirm(
-        self, ctx: FlowContext, state: ConversationState, *, idempotency_key: str
+        self,
+        ctx: FlowContext,
+        state: ConversationState,
+        *,
+        idempotency_key: str,
+        skip_suggestions: bool = False,
     ) -> tuple[WorkItem, bool]:
         due_date_str = state.data.get("due_date")
         return await self.create_work_item.execute(
+            origin=ctx.origin,
             prom_instance_id=ctx.prom_instance_id,
             prom_user_id=ctx.prom_user_id,
             workspace_slug=ctx.workspace_slug,
@@ -197,6 +244,8 @@ class CreateWorkItemFlow:
             assignee_ids=[state.data["assignee_id"]] if state.data.get("assignee_id") else None,
             due_date=date.fromisoformat(due_date_str) if due_date_str else None,
             idempotency_key=idempotency_key,
+            priority=None if skip_suggestions else state.data.get("auto_priority"),
+            label_ids=None if skip_suggestions else (state.data.get("label_ids") or None),
             correlation_id=ctx.correlation_id,
         )
 
@@ -266,6 +315,7 @@ class UpdateWorkItemFlow:
         self, ctx: FlowContext, state: ConversationState, state_id: str
     ) -> WorkItem:
         return await self.update_work_item_state.execute(
+            origin=ctx.origin,
             prom_instance_id=ctx.prom_instance_id,
             prom_user_id=ctx.prom_user_id,
             workspace_slug=ctx.workspace_slug,
@@ -279,6 +329,7 @@ class UpdateWorkItemFlow:
         self, ctx: FlowContext, state: ConversationState, assignee_id: str
     ) -> WorkItem:
         return await self.change_assignee.execute(
+            origin=ctx.origin,
             prom_instance_id=ctx.prom_instance_id,
             prom_user_id=ctx.prom_user_id,
             workspace_slug=ctx.workspace_slug,
@@ -290,6 +341,7 @@ class UpdateWorkItemFlow:
 
     async def confirm_mark_complete(self, ctx: FlowContext, state: ConversationState) -> WorkItem:
         return await self.mark_complete.execute(
+            origin=ctx.origin,
             prom_instance_id=ctx.prom_instance_id,
             prom_user_id=ctx.prom_user_id,
             workspace_slug=ctx.workspace_slug,
@@ -308,6 +360,7 @@ class UpdateWorkItemFlow:
         submits the free-text body at AWAIT_COMMENT."""
         comment_html = f"<p>{comment_text}</p>"
         return await self.add_comment.execute(
+            origin=ctx.origin,
             prom_instance_id=ctx.prom_instance_id,
             prom_user_id=ctx.prom_user_id,
             workspace_slug=ctx.workspace_slug,

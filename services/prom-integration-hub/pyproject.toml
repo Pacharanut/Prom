@@ -48,6 +48,12 @@ select = ["E", "F", "I", "UP", "B", "BLE"]
 # sa.Column(...) call to fit 100 chars hurts readability more than it helps. mypy excludes
 # migrations/ for the same reason (see [tool.mypy] below).
 "migrations/versions/*.py" = ["E501"]
+# The LLM system prompt and the Thai user copy are prose — wrapping them mid-sentence to fit 100
+# columns makes them harder to review and edit, and wrapped prompt text changes what the model
+# sees. Code in these files is still formatted normally.
+"src/application/ai/intent_parser.py" = ["E501"]
+"src/application/classification/classifier.py" = ["E501"]
+"src/channels/ai_copy.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -81,6 +87,7 @@ source_modules = ["src.domain", "src.application"]
 forbidden_modules = [
     "fastapi", "starlette", "sqlalchemy", "httpx", "requests", "aiohttp",
     "redis", "celery", "discord", "linebot", "boto3",
+    "openai", "anthropic", "langchain",
 ]
 
 [[tool.importlinter.contracts]]

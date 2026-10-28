@@ -7,7 +7,7 @@ see src/channels/discord/gateway_client.py). Sibling to src/channels/line/publis
 from __future__ import annotations
 
 from src.application.notifications.ports import MessagePublisher
-from src.channels.discord.rest import send_dm
+from src.channels.discord.rest import send_dm, send_message
 from src.domain.integrations.entities import ChannelType
 from src.shared.errors import ChannelDeliveryFailedError
 
@@ -26,3 +26,17 @@ class DiscordMessagePublisher(MessagePublisher):
             )
         bot_token = credentials.get("bot_token", "")
         await send_dm(bot_token, channel_user_id, text)
+
+    async def send_group_message(
+        self,
+        channel_type: ChannelType,
+        credentials: dict[str, str],
+        group_id: str,
+        text: str,
+    ) -> None:
+        """Phase 2D: `group_id` is a Discord text channel id."""
+        if channel_type is not ChannelType.DISCORD:
+            raise ChannelDeliveryFailedError(
+                f"DiscordMessagePublisher cannot send to {channel_type}"
+            )
+        await send_message(credentials.get("bot_token", ""), group_id, text)

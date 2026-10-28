@@ -105,6 +105,13 @@ class PostgresLinkedIdentityRepository(LinkedIdentityRepository):
         models = (await self._session.execute(stmt)).scalars().all()
         return [_to_domain(m) for m in models]
 
+    async def list_all_active(self) -> list[LinkedIdentity]:
+        stmt = select(LinkedIdentityModel).where(
+            LinkedIdentityModel.status == IdentityStatus.ACTIVE.value
+        )
+        models = (await self._session.execute(stmt)).scalars().all()
+        return [_to_domain(m) for m in models]
+
     async def list_all_active_with_default_workspace(self) -> list[LinkedIdentity]:
         stmt = select(LinkedIdentityModel).where(
             LinkedIdentityModel.status == IdentityStatus.ACTIVE.value,

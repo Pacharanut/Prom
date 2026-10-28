@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.adapters.persistence.models import AuditLogEntryModel
-from src.application.account_linking.ports import AuditLogRepository
+from src.application.account_linking.ports import AuditLogFilters, AuditLogRepository
 from src.domain.audit.entities import AuditLogEntry, ResultStatus
 from src.domain.integrations.entities import ChannelType
 
@@ -65,10 +65,39 @@ class PostgresAuditLogRepository(AuditLogRepository):
         installation_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
+        filters: AuditLogFilters | None = None,
     ) -> list[AuditLogEntry]:
         stmt = select(AuditLogEntryModel).where(AuditLogEntryModel.customer_id == customer_id)
         if installation_id is not None:
             stmt = stmt.where(AuditLogEntryModel.installation_id == installation_id)
+        if filters is not None:
+            if filters.channel_type is not None:
+                stmt = stmt.where(AuditLogEntryModel.channel_type == filters.channel_type.value)
+            if filters.action_contains:
+                stmt = stmt.where(AuditLogEntryModel.action.contains(filters.action_contains))
+            if filters.target_id:
+                stmt = stmt.where(AuditLogEntryModel.target_id == filters.target_id)
+            if filters.result_status is not None:
+                stmt = stmt.where(AuditLogEntryModel.result_status == filters.result_status.value)
+            if filters.occurred_after is not None:
+                stmt = stmt.where(AuditLogEntryModel.occurred_at >= filters.occurred_after)
+            if filters.occurred_before is not None:
+                stmt = stmt.where(AuditLogEntryModel.occurred_at < filters.occurred_before)
         stmt = stmt.order_by(AuditLogEntryModel.occurred_at.desc()).limit(limit).offset(offset)
+        models = (await self._session.execute(stmt)).scalars().all()
+        return [_to_domain(model) for model in models]
+
+    async def list_for_target(
+        self, target_type: str, target_id: str, *, limit: int = 100
+    ) -> list[AuditLogEntry]:
+        stmt = (
+            select(AuditLogEntryModel)
+            .where(
+                AuditLogEntryModel.target_type == target_type,
+                AuditLogEntryModel.target_id == target_id,
+            )
+            .order_by(AuditLogEntryModel.occurred_at.desc())
+            .limit(limit)
+        )
         models = (await self._session.execute(stmt)).scalars().all()
         return [_to_domain(model) for model in models]

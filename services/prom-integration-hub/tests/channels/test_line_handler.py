@@ -178,7 +178,7 @@ async def test_menu_command(line_harness: LineHandlerHarness, sent_messages: lis
     handler = line_harness.handler
     await handler.handle_payload(installation, "token-1", _message_event("เมนู"))
     actions = _last_postback_actions(sent_messages)
-    assert actions == {"create", "my_tasks", "update"}
+    assert actions == {"create", "my_tasks", "update", "summary", "notif_settings"}
 
 
 @pytest.mark.asyncio
@@ -467,3 +467,180 @@ async def test_workspace_selection_when_multiple_workspaces_and_no_default(
     )
     # Resumes the originally-requested action (my_tasks) once a workspace is chosen.
     assert "ไม่พบงานที่ได้รับมอบหมาย" in _last_text(sent_messages) or "ENG-" in _last_text(sent_messages)
+
+
+@pytest.mark.parametrize("confirm_value", [None, "plain"])
+@pytest.mark.asyncio
+async def test_button_create_flow_shows_and_applies_auto_tags(
+    line_harness: LineHandlerHarness, sent_messages: list, confirm_value: str | None
+) -> None:
+    """Phase 2C: the Phase 1 button flow gets the same auto-tagging as the AI flow — shown on
+    the review card, applied on "ยืนยัน", dropped on "ยืนยัน (ไม่ใส่ tag)"."""
+    from dataclasses import replace
+
+    from src.application.ai.ports import AiDefaults
+    from src.application.ai.settings import ResolveAiConnection
+    from src.application.classification.classifier import AutoClassifier, SuggestClassification
+    from src.application.work_items.use_cases import ListLabels
+    from src.domain.classification.entities import (
+        ClassificationRule,
+        ClassificationSettings,
+        Priority,
+    )
+    from src.domain.work_items.entities import WorkItemLabel
+    from tests.fakes.repositories import FakeAiSettingsRepository, FakeClassificationRepository
+    from tests.fakes.support import FakeLlmClient
+
+    _, _, installation, _ = await _linked_setup(line_harness)
+    h = line_harness
+    h.prom_api_client.projects = [ProjectRef(id="p1", name="Engineering", identifier="ENG")]
+    h.prom_api_client.states_by_project["p1"] = [
+        WorkItemState(id="s1", name="Todo", group="unstarted")
+    ]
+    h.prom_api_client.labels_by_project["p1"] = [WorkItemLabel(id="l-bug", name="Bug")]
+    workspace_id = (await h.installations.list_workspaces(installation.id))[
+        0
+    ].workspace_connection_id
+    repo = FakeClassificationRepository()
+    await repo.save(
+        ClassificationSettings(
+            workspace_id, rules=[ClassificationRule("bug", "Bug", Priority.HIGH)]
+        )
+    )
+    classifier = AutoClassifier(
+        list_labels=ListLabels(
+            prom_instances=h.prom_instances,
+            delegated_credentials=h.delegated_credentials,
+            secrets_provider=h.secrets_provider,
+            prom_api_client=h.prom_api_client,
+            audit_log=h.audit_log,
+            clock=h.clock,
+        ),
+        suggest=SuggestClassification(classification=repo, llm_client=FakeLlmClient()),
+        resolve_connection=ResolveAiConnection(
+            ai_settings=FakeAiSettingsRepository(),
+            secrets_provider=h.secrets_provider,
+            defaults=AiDefaults(False, None, None, "m", 15),
+        ),
+    )
+    base = h.handler
+    handler = replace(base, create_flow=replace(base.create_flow, auto_classifier=classifier))
+
+    steps = [
+        _message_event("สร้างงาน", webhook_event_id="t1"),
+        _message_event("Fix the bug", webhook_event_id="t2"),
+        _postback_event(encode_postback("select_project", value="p1"), webhook_event_id="t3"),
+        _postback_event(encode_postback("select_state", value="skip"), webhook_event_id="t4"),
+        _postback_event(encode_postback("select_assignee", value="skip"), webhook_event_id="t5"),
+        _message_event("ข้าม", webhook_event_id="t6"),
+    ]
+    for step in steps:
+        await handler.handle_payload(installation, "token-1", step)
+
+    review = _last_text(sent_messages)
+    assert "Label: Bug (ตามกฎของ workspace)" in review
+    assert "Priority: สูง" in review
+    datas = [i["action"]["data"] for i in sent_messages[-1][2][0]["quickReply"]["items"]]
+    assert encode_postback("confirm", value="plain") in datas
+
+    confirm = (
+        encode_postback("confirm", value=confirm_value)
+        if confirm_value
+        else encode_postback("confirm")
+    )
+    await handler.handle_payload(
+        installation, "token-1", _postback_event(confirm, webhook_event_id="t7")
+    )
+    assert "สร้างงานสำเร็จ" in _last_text(sent_messages)
+    extras = next(iter(h.prom_api_client.created_extras.values()))
+    if confirm_value == "plain":
+        assert extras == {"priority": None, "label_ids": []}
+    else:
+        assert extras == {"priority": "high", "label_ids": ["l-bug"]}
+
+
+@pytest.mark.asyncio
+async def test_line_writes_are_audited_with_channel_and_show_in_history(
+    line_harness: LineHandlerHarness, sent_messages: list
+) -> None:
+    """Phase 2E: a change made from LINE is audited as LINE, and "ประวัติ" in the update menu
+    labels the matching Plane activity "💬 LINE"."""
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from src.application.work_items.timeline import GetWorkItemTimeline
+    from src.domain.integrations.entities import ChannelType
+    from src.domain.work_items.entities import WorkItem, WorkItemActivity
+
+    _, _, installation, _ = await _linked_setup(line_harness)
+    h = line_harness
+    h.prom_api_client.states_by_project["p1"] = [
+        WorkItemState(id="s1", name="Todo", group="unstarted"),
+        WorkItemState(id="s3", name="Done", group="completed"),
+    ]
+    h.prom_api_client.members_by_project["p1"] = [
+        ProjectMemberRef(user_id="prom-user-1", display_name="Praew")
+    ]
+    h.prom_api_client.work_items["wi-9"] = WorkItem(
+        id="wi-9",
+        sequence_id=9,
+        project_id="p1",
+        name="Ship",
+        state_id="s1",
+        priority=None,
+        assignee_ids=["prom-user-1"],
+        target_date=None,
+        completed_at=None,
+    )
+    handler = replace(
+        h.handler,
+        timeline=GetWorkItemTimeline(
+            prom_instances=h.prom_instances,
+            delegated_credentials=h.delegated_credentials,
+            secrets_provider=h.secrets_provider,
+            prom_api_client=h.prom_api_client,
+            audit_log=h.audit_log,
+            clock=h.clock,
+        ),
+    )
+
+    for n, data in enumerate(
+        [
+            encode_postback("select_work_item", value="wi-9", project="p1"),
+            encode_postback("select_update_action", value="complete"),
+            encode_postback("confirm"),
+        ]
+    ):
+        await handler.handle_payload(
+            installation, "token-1", _postback_event(data, webhook_event_id=f"h{n}")
+        )
+
+    completed = h.audit_log.entries_for_action("work_item.completed")[-1]
+    assert completed.channel_type is ChannelType.LINE
+    assert completed.channel_user_id == _USER and completed.installation_id == installation.id
+
+    # Plane records the same change as an activity by the same user, seconds later.
+    h.prom_api_client.activities["wi-9"] = [
+        WorkItemActivity(
+            id="a1",
+            verb="updated",
+            field="state",
+            old_value="Todo",
+            new_value="Done",
+            actor_id="prom-user-1",
+            created_at=completed.occurred_at + timedelta(seconds=2),
+        )
+    ]
+    for n, data in enumerate(
+        [
+            encode_postback("select_work_item", value="wi-9", project="p1"),
+            encode_postback("select_update_action", value="history"),
+        ]
+    ):
+        await handler.handle_payload(
+            installation, "token-1", _postback_event(data, webhook_event_id=f"k{n}")
+        )
+
+    text = _last_text(sent_messages)
+    assert "ประวัติงาน" in text and "💬 LINE · Praew — สถานะ: Todo → Done" in text
+    assert "select_update_action" in _last_postback_actions(sent_messages)

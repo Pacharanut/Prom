@@ -28,6 +28,7 @@ from typing import Any
 
 import discord
 
+from src.channels import group_copy
 from src.channels.discord.components import DiscordMessage
 from src.channels.discord.events import DiscordEvent
 from src.channels.discord.handler import DiscordWebhookHandler, SendFn
@@ -49,12 +50,21 @@ _SELECT_PLACEHOLDER_MAX_LEN = 150
 _SELECT_OPTION_LABEL_MAX_LEN = 100
 
 
+_GROUP_COMMANDS = (
+    group_copy.BIND_KEYWORDS
+    | group_copy.SETTINGS_KEYWORDS
+    | group_copy.UNBIND_KEYWORDS
+    | group_copy.HELP_KEYWORDS
+)
+
+
 def build_client(
     installation: ChannelInstallation, handler_factory: HandlerFactory
 ) -> discord.Client:
     intents = discord.Intents.none()
     intents.guilds = True
     intents.dm_messages = True
+    intents.guild_messages = True  # Phase 2D: group commands in server text channels
     intents.message_content = True
     """Privileged intent — must be explicitly enabled for the bot application in the Discord
     Developer Portal ("Message Content Intent" under Bot settings), or DM text will arrive empty.
@@ -119,6 +129,11 @@ def build_client(
                 component_custom_id=custom_id,
                 component_value=value,
                 dedup_id=str(interaction.id),
+                group_id=(
+                    str(interaction.channel_id)
+                    if interaction.guild_id is not None and interaction.channel_id is not None
+                    else None
+                ),
             )
             async with handler_factory() as handler:
                 await handler.handle_event(installation, event, _send_for_interaction(interaction))
@@ -147,8 +162,13 @@ def build_client(
     async def on_message(message: discord.Message) -> None:
         if message.author.bot:
             return
+        group_id: str | None = None
         if message.channel.type is not discord.ChannelType.private:
-            return
+            # Phase 2D: in server channels only the group commands are forwarded — ordinary
+            # conversation never reaches the handler (or opens a DB session).
+            if message.content.strip().lower() not in _GROUP_COMMANDS or message.guild is None:
+                return
+            group_id = str(message.channel.id)
 
         event = DiscordEvent(
             kind="message",
@@ -157,6 +177,7 @@ def build_client(
             component_custom_id=None,
             component_value=None,
             dedup_id=str(message.id),
+            group_id=group_id,
         )
 
         async def _send(out: DiscordMessage) -> None:

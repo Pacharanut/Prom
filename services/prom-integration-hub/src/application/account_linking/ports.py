@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from src.domain.audit.entities import AuditLogEntry
+from src.domain.audit.entities import AuditLogEntry, ResultStatus
 from src.domain.customers.entities import Customer
 from src.domain.identities.entities import DelegatedCredential, LinkedIdentity, LinkingCode
 from src.domain.instances.entities import PromInstance
@@ -124,6 +124,12 @@ class LinkedIdentityRepository(Protocol):
         (channel_installation_id, channel_user_id)."""
         ...
 
+    async def list_all_active(self) -> list[LinkedIdentity]:
+        """Phase 2B: every active identity — the morning notification run resolves each one's
+        workspace itself (identity default → installation default → its only linked
+        workspace) instead of skipping identities without an identity-level default."""
+        ...
+
     async def list_all_active_with_default_workspace(self) -> list[LinkedIdentity]:
         """Every active identity, across every customer, that has a
         `default_workspace_connection_id` set — added in Gate 7 for the due-date/overdue
@@ -189,6 +195,18 @@ class DelegatedCredentialRepository(Protocol):
         ...
 
 
+@dataclass
+class AuditLogFilters:
+    """Phase 2E: searchable history. All optional, all AND-ed."""
+
+    channel_type: ChannelType | None = None
+    action_contains: str | None = None
+    target_id: str | None = None
+    result_status: ResultStatus | None = None
+    occurred_after: datetime | None = None
+    occurred_before: datetime | None = None
+
+
 class AuditLogRepository(Protocol):
     async def add(self, entry: AuditLogEntry) -> None: ...
 
@@ -199,6 +217,7 @@ class AuditLogRepository(Protocol):
         installation_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
+        filters: AuditLogFilters | None = None,
     ) -> list[AuditLogEntry]:
         """Most-recent-first audit trail for one customer, optionally narrowed to one
         installation — added in Gate 8 for the admin audit-visibility page. Deliberately no
@@ -209,7 +228,14 @@ class AuditLogRepository(Protocol):
         *related* to that workspace, which would be misleading rather than useful. Plain
         limit/offset, not cursor-based: this is a straightforward `ORDER BY occurred_at DESC
         LIMIT/OFFSET` query, not worth inventing a cursor protocol for (unlike
-        `ListMyWorkItems`/`list_work_items`, which wraps Prom's own real cursor-paginated API)."""
+        `ListMyWorkItems`/`list_work_items`, which wraps Prom's own real cursor-paginated API).
+        Phase 2E adds optional `filters` (searchable history)."""
+        ...
+
+    async def list_for_target(
+        self, target_type: str, target_id: str, *, limit: int = 100
+    ) -> list[AuditLogEntry]:
+        """Phase 2E: newest-first entries about one target (e.g. one work item)."""
         ...
 
 

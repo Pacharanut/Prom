@@ -16,6 +16,7 @@ from apps.api.dependencies import (
     get_channel_installation_repository,
     get_create_work_item,
     get_get_work_item,
+    get_get_work_item_timeline,
     get_idempotency_repository,
     get_list_my_work_items,
     get_list_project_members,
@@ -35,6 +36,7 @@ from apps.api.schemas import (
     CreateWorkItemRequest,
     CreateWorkItemResponse,
     MyTasksResponse,
+    TimelineEntryResponse,
     UpdateStateRequest,
     WorkItemResponse,
     WorkItemSearchResultResponse,
@@ -43,6 +45,7 @@ from src.adapters.persistence.channel_installation_repository import (
     PostgresChannelInstallationRepository,
 )
 from src.application.work_items.ports import IdempotencyRepository
+from src.application.work_items.timeline import GetWorkItemTimeline
 from src.application.work_items.use_cases import (
     AddComment,
     ChangeAssignee,
@@ -446,6 +449,45 @@ async def list_project_members(
 # would otherwise shadow "/my-tasks", "/search", and "/projects" (each also a single segment
 # after the router's prefix) if it came first — it very nearly did during development; keep any
 # new single-segment GET route above this one, not below. -----------------------------------
+
+
+@router.get("/{work_item_id}/timeline", response_model=list[TimelineEntryResponse])
+async def get_work_item_timeline(
+    work_item_id: str,
+    use_case: Annotated[GetWorkItemTimeline, Depends(get_get_work_item_timeline)],
+    prom_instance_id: Annotated[UUID, Query()],
+    prom_user_id: Annotated[str, Query()],
+    workspace_slug: Annotated[str, Query()],
+    project_id: Annotated[str, Query()],
+    source: Annotated[Literal["line", "discord", "hub", "plane"] | None, Query()] = None,
+    kind: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=100)] = 20,
+) -> list[TimelineEntryResponse]:
+    """Phase 2E: Plane's history of one work item, each change labelled with where it came
+    from. `source`/`kind` filter it (searchable history)."""
+    entries = await use_case.execute(
+        prom_instance_id=prom_instance_id,
+        prom_user_id=prom_user_id,
+        workspace_slug=workspace_slug,
+        project_id=project_id,
+        work_item_id=work_item_id,
+        source=source,
+        kind=kind,
+        limit=limit,
+        correlation_id=_correlation_id(),
+    )
+    return [
+        TimelineEntryResponse(
+            at=e.at,
+            source=e.source,
+            kind=e.kind,
+            actor_id=e.actor_id,
+            actor_name=e.actor_name,
+            old_value=e.old_value,
+            new_value=e.new_value,
+        )
+        for e in entries
+    ]
 
 
 @router.get("/{work_item_id}", response_model=WorkItemResponse)

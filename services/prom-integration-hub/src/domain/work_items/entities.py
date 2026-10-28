@@ -32,6 +32,30 @@ class WorkItemState:
 
 
 @dataclass
+class WorkItemLabel:
+    """Phase 2C. Plane labels belong to one project — the same name can exist (with different
+    ids) in several projects, which is why auto-tagging rules store names, not ids."""
+
+    id: str
+    name: str
+
+
+@dataclass
+class WorkItemActivity:
+    """Phase 2E: one entry of Plane's own work-item history (IssueActivity)."""
+
+    id: str
+    verb: str
+    """"created" / "updated" / "deleted"."""
+    field: str | None
+    """e.g. "state", "assignees", "target_date", "priority", "labels", "name", "comment"."""
+    old_value: str | None
+    new_value: str | None
+    actor_id: str | None
+    created_at: datetime
+
+
+@dataclass
 class ProjectMemberRef:
     user_id: str
     display_name: str

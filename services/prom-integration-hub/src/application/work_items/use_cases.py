@@ -22,11 +22,12 @@ from src.application.account_linking.ports import (
 )
 from src.application.prom_api.ports import PromApiClient, WorkItemPage
 from src.application.shared.audit_writer import AuditWriter
-from src.domain.audit.entities import ResultStatus
+from src.domain.audit.entities import AuditOrigin, ResultStatus
 from src.domain.work_items.entities import (
     ProjectMemberRef,
     ProjectRef,
     WorkItem,
+    WorkItemLabel,
     WorkItemSearchResult,
     WorkItemState,
 )
@@ -130,6 +131,9 @@ class CreateWorkItem(_WorkItemUseCaseBase):
         due_date: date | None = None,
         description_html: str | None = None,
         idempotency_key: str | None = None,
+        priority: str | None = None,
+        label_ids: list[str] | None = None,
+        origin: AuditOrigin | None = None,
         correlation_id: str,
     ) -> tuple[WorkItem, bool]:
         """Returns (work_item, was_replay). Two independent dedup layers are deliberate, not
@@ -146,9 +150,9 @@ class CreateWorkItem(_WorkItemUseCaseBase):
             await audit.write(
                 customer_id=customer_id,
                 prom_instance_id=prom_instance_id,
-                installation_id=None,
-                channel_type=None,
-                channel_user_id=None,
+                installation_id=origin.installation_id if origin else None,
+                channel_type=origin.channel_type if origin else None,
+                channel_user_id=origin.channel_user_id if origin else None,
                 prom_user_id=prom_user_id,
                 action="work_item.create_failed",
                 target_type="work_item",
@@ -177,6 +181,8 @@ class CreateWorkItem(_WorkItemUseCaseBase):
                 description_html=description_html,
                 external_id=idempotency_key or correlation_id,
                 external_source="prom-integration-hub",
+                priority=priority,
+                label_ids=label_ids,
             )
         except DomainError as exc:
             await _fail(exc, ctx.customer_id)
@@ -184,9 +190,9 @@ class CreateWorkItem(_WorkItemUseCaseBase):
         await audit.write(
             customer_id=ctx.customer_id,
             prom_instance_id=prom_instance_id,
-            installation_id=None,
-            channel_type=None,
-            channel_user_id=None,
+            installation_id=origin.installation_id if origin else None,
+            channel_type=origin.channel_type if origin else None,
+            channel_user_id=origin.channel_user_id if origin else None,
             prom_user_id=prom_user_id,
             action="work_item.create_replayed" if was_replay else "work_item.created",
             target_type="work_item",
@@ -398,6 +404,7 @@ class UpdateWorkItemState(_WorkItemUseCaseBase):
         project_id: str,
         work_item_id: str,
         state_id: str,
+        origin: AuditOrigin | None = None,
         correlation_id: str,
     ) -> WorkItem:
         audit = self._audit()
@@ -406,9 +413,9 @@ class UpdateWorkItemState(_WorkItemUseCaseBase):
             await audit.write(
                 customer_id=customer_id,
                 prom_instance_id=prom_instance_id,
-                installation_id=None,
-                channel_type=None,
-                channel_user_id=None,
+                installation_id=origin.installation_id if origin else None,
+                channel_type=origin.channel_type if origin else None,
+                channel_user_id=origin.channel_user_id if origin else None,
                 prom_user_id=prom_user_id,
                 action="work_item.update_failed",
                 target_type="work_item",
@@ -439,9 +446,9 @@ class UpdateWorkItemState(_WorkItemUseCaseBase):
         await audit.write(
             customer_id=ctx.customer_id,
             prom_instance_id=prom_instance_id,
-            installation_id=None,
-            channel_type=None,
-            channel_user_id=None,
+            installation_id=origin.installation_id if origin else None,
+            channel_type=origin.channel_type if origin else None,
+            channel_user_id=origin.channel_user_id if origin else None,
             prom_user_id=prom_user_id,
             action="work_item.updated",
             target_type="work_item",
@@ -464,6 +471,7 @@ class ChangeAssignee(_WorkItemUseCaseBase):
         project_id: str,
         work_item_id: str,
         assignee_ids: list[str],
+        origin: AuditOrigin | None = None,
         correlation_id: str,
     ) -> WorkItem:
         audit = self._audit()
@@ -472,9 +480,9 @@ class ChangeAssignee(_WorkItemUseCaseBase):
             await audit.write(
                 customer_id=customer_id,
                 prom_instance_id=prom_instance_id,
-                installation_id=None,
-                channel_type=None,
-                channel_user_id=None,
+                installation_id=origin.installation_id if origin else None,
+                channel_type=origin.channel_type if origin else None,
+                channel_user_id=origin.channel_user_id if origin else None,
                 prom_user_id=prom_user_id,
                 action="work_item.assign_failed",
                 target_type="work_item",
@@ -505,9 +513,9 @@ class ChangeAssignee(_WorkItemUseCaseBase):
         await audit.write(
             customer_id=ctx.customer_id,
             prom_instance_id=prom_instance_id,
-            installation_id=None,
-            channel_type=None,
-            channel_user_id=None,
+            installation_id=origin.installation_id if origin else None,
+            channel_type=origin.channel_type if origin else None,
+            channel_user_id=origin.channel_user_id if origin else None,
             prom_user_id=prom_user_id,
             action="work_item.assigned",
             target_type="work_item",
@@ -530,6 +538,7 @@ class AddComment(_WorkItemUseCaseBase):
         project_id: str,
         work_item_id: str,
         comment_html: str,
+        origin: AuditOrigin | None = None,
         correlation_id: str,
     ) -> str:
         audit = self._audit()
@@ -538,9 +547,9 @@ class AddComment(_WorkItemUseCaseBase):
             await audit.write(
                 customer_id=customer_id,
                 prom_instance_id=prom_instance_id,
-                installation_id=None,
-                channel_type=None,
-                channel_user_id=None,
+                installation_id=origin.installation_id if origin else None,
+                channel_type=origin.channel_type if origin else None,
+                channel_user_id=origin.channel_user_id if origin else None,
                 prom_user_id=prom_user_id,
                 action="comment.create_failed",
                 target_type="work_item",
@@ -571,9 +580,9 @@ class AddComment(_WorkItemUseCaseBase):
         await audit.write(
             customer_id=ctx.customer_id,
             prom_instance_id=prom_instance_id,
-            installation_id=None,
-            channel_type=None,
-            channel_user_id=None,
+            installation_id=origin.installation_id if origin else None,
+            channel_type=origin.channel_type if origin else None,
+            channel_user_id=origin.channel_user_id if origin else None,
             prom_user_id=prom_user_id,
             action="comment.created",
             target_type="work_item",
@@ -595,6 +604,7 @@ class MarkComplete(_WorkItemUseCaseBase):
         workspace_slug: str,
         project_id: str,
         work_item_id: str,
+        origin: AuditOrigin | None = None,
         correlation_id: str,
     ) -> WorkItem:
         audit = self._audit()
@@ -603,9 +613,9 @@ class MarkComplete(_WorkItemUseCaseBase):
             await audit.write(
                 customer_id=customer_id,
                 prom_instance_id=prom_instance_id,
-                installation_id=None,
-                channel_type=None,
-                channel_user_id=None,
+                installation_id=origin.installation_id if origin else None,
+                channel_type=origin.channel_type if origin else None,
+                channel_user_id=origin.channel_user_id if origin else None,
                 prom_user_id=prom_user_id,
                 action="work_item.complete_failed",
                 target_type="work_item",
@@ -653,9 +663,9 @@ class MarkComplete(_WorkItemUseCaseBase):
         await audit.write(
             customer_id=ctx.customer_id,
             prom_instance_id=prom_instance_id,
-            installation_id=None,
-            channel_type=None,
-            channel_user_id=None,
+            installation_id=origin.installation_id if origin else None,
+            channel_type=origin.channel_type if origin else None,
+            channel_user_id=origin.channel_user_id if origin else None,
             prom_user_id=prom_user_id,
             action="work_item.completed",
             target_type="work_item",
@@ -665,3 +675,166 @@ class MarkComplete(_WorkItemUseCaseBase):
             error_code=None,
         )
         return work_item
+
+
+@dataclass
+class RescheduleWorkItem(_WorkItemUseCaseBase):
+    """Phase 2 (AI assistant, "เลื่อน deadline"): set a work item's due date. Plane's field is
+    `target_date` (see WorkItem.target_date); `None` clears it."""
+
+    async def execute(
+        self,
+        *,
+        prom_instance_id: UUID,
+        prom_user_id: str,
+        workspace_slug: str,
+        project_id: str,
+        work_item_id: str,
+        due_date: date | None,
+        origin: AuditOrigin | None = None,
+        correlation_id: str,
+    ) -> WorkItem:
+        audit = self._audit()
+
+        async def _fail(error: DomainError, customer_id: UUID | None = None) -> NoReturn:
+            await audit.write(
+                customer_id=customer_id,
+                prom_instance_id=prom_instance_id,
+                installation_id=origin.installation_id if origin else None,
+                channel_type=origin.channel_type if origin else None,
+                channel_user_id=origin.channel_user_id if origin else None,
+                prom_user_id=prom_user_id,
+                action="work_item.reschedule_failed",
+                target_type="work_item",
+                target_id=work_item_id,
+                correlation_id=correlation_id,
+                result_status=ResultStatus.FAILURE,
+                error_code=error.error_code,
+            )
+            raise error
+
+        try:
+            ctx = await self._resolve(prom_instance_id=prom_instance_id, prom_user_id=prom_user_id)
+        except DomainError as exc:
+            await _fail(exc)
+
+        try:
+            work_item = await self.prom_api_client.update_work_item(
+                ctx.base_url,
+                ctx.token,
+                workspace_slug,
+                project_id,
+                work_item_id,
+                fields={"target_date": due_date.isoformat() if due_date else None},
+            )
+        except DomainError as exc:
+            await _fail(exc, ctx.customer_id)
+
+        await audit.write(
+            customer_id=ctx.customer_id,
+            prom_instance_id=prom_instance_id,
+            installation_id=origin.installation_id if origin else None,
+            channel_type=origin.channel_type if origin else None,
+            channel_user_id=origin.channel_user_id if origin else None,
+            prom_user_id=prom_user_id,
+            action="work_item.rescheduled",
+            target_type="work_item",
+            target_id=work_item.id,
+            correlation_id=correlation_id,
+            result_status=ResultStatus.SUCCESS,
+            error_code=None,
+        )
+        return work_item
+
+
+@dataclass
+class ListProjectWorkItems(_WorkItemUseCaseBase):
+    """Phase 2 (AI search by project / by person): the first page of one project's work items,
+    newest first, optionally filtered to one assignee. One page only (same documented-cap
+    reasoning as ListMyWorkItems) — this backs a chat reply, not a report."""
+
+    async def execute(
+        self,
+        *,
+        prom_instance_id: UUID,
+        prom_user_id: str,
+        workspace_slug: str,
+        project_id: str,
+        assignee_id: str | None = None,
+        limit: int = 10,
+        correlation_id: str,
+    ) -> list[WorkItem]:
+        ctx = await self._resolve(prom_instance_id=prom_instance_id, prom_user_id=prom_user_id)
+        page = await self.prom_api_client.list_work_items(
+            ctx.base_url, ctx.token, workspace_slug, project_id, per_page=_LIST_PER_PAGE
+        )
+        items = [
+            item for item in page.items if assignee_id is None or assignee_id in item.assignee_ids
+        ]
+        items.sort(key=lambda item: item.sequence_id, reverse=True)
+        return items[:limit]
+
+
+_MAX_BLOCKED_CHECKS = 20
+"""FindBlockedWorkItems checks at most this many work items (one relations call each, plus one
+call per blocker) — it backs one line of a daily summary, not a dependency report."""
+
+
+@dataclass
+class FindBlockedWorkItems(_WorkItemUseCaseBase):
+    """Phase 2B (daily summary): which of the given work items are blocked by a work item that
+    isn't finished yet. Plane relations only give the blocker's id, so each blocker is fetched to
+    check `completed_at` (a blocker the user can't read counts as unfinished — it still blocks).
+    Best-effort: a relations lookup that fails is skipped, never raised."""
+
+    async def execute(
+        self,
+        *,
+        prom_instance_id: UUID,
+        prom_user_id: str,
+        workspace_slug: str,
+        work_items: list[WorkItem],
+        correlation_id: str,
+    ) -> list[WorkItem]:
+        ctx = await self._resolve(prom_instance_id=prom_instance_id, prom_user_id=prom_user_id)
+        blocked: list[WorkItem] = []
+        finished_cache: dict[str, bool] = {}
+        for item in work_items[:_MAX_BLOCKED_CHECKS]:
+            try:
+                blockers = await self.prom_api_client.list_blocked_by(
+                    ctx.base_url, ctx.token, workspace_slug, item.project_id, item.id
+                )
+            except DomainError:
+                continue
+            for blocker_project_id, blocker_id in blockers:
+                if blocker_id not in finished_cache:
+                    try:
+                        blocker = await self.prom_api_client.get_work_item(
+                            ctx.base_url, ctx.token, workspace_slug, blocker_project_id, blocker_id
+                        )
+                        finished_cache[blocker_id] = blocker.completed_at is not None
+                    except DomainError:
+                        finished_cache[blocker_id] = False
+                if not finished_cache[blocker_id]:
+                    blocked.append(item)
+                    break
+        return blocked
+
+
+@dataclass
+class ListLabels(_WorkItemUseCaseBase):
+    """Phase 2C: a project's labels, for auto-tagging (names → ids for this project)."""
+
+    async def execute(
+        self,
+        *,
+        prom_instance_id: UUID,
+        prom_user_id: str,
+        workspace_slug: str,
+        project_id: str,
+        correlation_id: str,
+    ) -> list[WorkItemLabel]:
+        ctx = await self._resolve(prom_instance_id=prom_instance_id, prom_user_id=prom_user_id)
+        return await self.prom_api_client.list_labels(
+            ctx.base_url, ctx.token, workspace_slug, project_id
+        )

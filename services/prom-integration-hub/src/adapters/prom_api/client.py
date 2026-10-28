@@ -20,6 +20,8 @@ from src.domain.work_items.entities import (
     ProjectMemberRef,
     ProjectRef,
     WorkItem,
+    WorkItemActivity,
+    WorkItemLabel,
     WorkItemSearchResult,
     WorkItemState,
 )
@@ -76,6 +78,9 @@ def _extract_results(body: Any) -> list[dict[str, Any]]:
     if isinstance(body, list):
         return body
     return []
+
+
+_LIST_PER_PAGE_ACTIVITIES = 100
 
 
 class HttpPromApiClient(PromApiClient):
@@ -193,6 +198,52 @@ class HttpPromApiClient(PromApiClient):
             for m in _extract_results(response.json())
         ]
 
+    async def list_work_item_activities(
+        self, base_url: str, token: str, workspace_slug: str, project_id: str, work_item_id: str
+    ) -> list[WorkItemActivity]:
+        response = await self._request(
+            "GET",
+            base_url,
+            token,
+            f"workspaces/{workspace_slug}/projects/{project_id}/work-items/{work_item_id}/activities/",
+            params={"per_page": _LIST_PER_PAGE_ACTIVITIES, "order_by": "-created_at"},
+        )
+        self._raise_for_status(response, not_found_error=WorkItemNotFoundError)
+        activities: list[WorkItemActivity] = []
+        for raw in _extract_results(response.json()):
+            created = raw.get("created_at")
+            if not created:
+                continue
+            activities.append(
+                WorkItemActivity(
+                    id=str(raw.get("id")),
+                    verb=str(raw.get("verb") or ""),
+                    field=raw.get("field"),
+                    old_value=raw.get("old_value"),
+                    new_value=raw.get("new_value"),
+                    actor_id=str(raw["actor"]) if raw.get("actor") else None,
+                    created_at=datetime.fromisoformat(str(created).replace("Z", "+00:00")),
+                )
+            )
+        return activities
+
+    async def list_labels(
+        self, base_url: str, token: str, workspace_slug: str, project_id: str
+    ) -> list[WorkItemLabel]:
+        response = await self._request(
+            "GET",
+            base_url,
+            token,
+            f"workspaces/{workspace_slug}/projects/{project_id}/labels/",
+            params={"per_page": _LIST_PAGE_CAP},
+        )
+        self._raise_for_status(response)
+        return [
+            WorkItemLabel(id=str(label["id"]), name=str(label["name"]))
+            for label in _extract_results(response.json())
+            if label.get("id") and label.get("name")
+        ]
+
     async def create_work_item(
         self,
         base_url: str,
@@ -207,6 +258,8 @@ class HttpPromApiClient(PromApiClient):
         description_html: str | None,
         external_id: str,
         external_source: str,
+        priority: str | None = None,
+        label_ids: list[str] | None = None,
     ) -> tuple[WorkItem, bool]:
         body: dict[str, object] = {
             "name": name,
@@ -221,6 +274,10 @@ class HttpPromApiClient(PromApiClient):
             body["target_date"] = target_date.isoformat()
         if description_html is not None:
             body["description_html"] = description_html
+        if priority is not None:
+            body["priority"] = priority
+        if label_ids:
+            body["labels"] = label_ids
 
         response = await self._request(
             "POST",
@@ -328,6 +385,24 @@ class HttpPromApiClient(PromApiClient):
         )
         self._raise_for_status(response, not_found_error=WorkItemNotFoundError)
         return str(response.json()["id"])
+
+    async def list_blocked_by(
+        self, base_url: str, token: str, workspace_slug: str, project_id: str, work_item_id: str
+    ) -> list[tuple[str, str]]:
+        response = await self._request(
+            "GET",
+            base_url,
+            token,
+            f"workspaces/{workspace_slug}/projects/{project_id}/work-items/{work_item_id}/relations/",
+        )
+        self._raise_for_status(response, not_found_error=WorkItemNotFoundError)
+        body = response.json()
+        blocked_by = body.get("blocked_by", []) if isinstance(body, dict) else []
+        return [
+            (str(rel["project_id"]), str(rel["issue_id"]))
+            for rel in blocked_by
+            if isinstance(rel, dict) and rel.get("project_id") and rel.get("issue_id")
+        ]
 
     async def search_work_items(
         self,

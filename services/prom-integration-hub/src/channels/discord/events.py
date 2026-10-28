@@ -24,6 +24,8 @@ class DiscordEvent:
     Buttons carry no separate value — the custom_id alone identifies the action."""
     dedup_id: str
     """message.id or interaction.id, stringified — see dedup_key()."""
+    group_id: str | None = None
+    """Phase 2D: the text channel id when the event came from a server channel, not a DM."""
 
     def dedup_key(self) -> str:
         return f"discord:{self.kind}:{self.dedup_id}"

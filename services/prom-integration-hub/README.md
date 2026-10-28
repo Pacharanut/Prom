@@ -277,6 +277,152 @@ without a timezone-aware cron dependency. Reuses Gate 4's `ListMyWorkItems` as-i
 webhook dedup already uses (different key namespace) so multiple beat runs in one day don't repeat
 a notification.
 
+## AI assistant (Phase 2A)
+
+Free text that isn't a Phase 1 keyword (`เมนู`/`สร้างงาน`/`งานของฉัน`/`อัปเดต`) goes to the AI
+assistant on both LINE and Discord — spec items 1, 3, 6, 7 of the AI MVP. Design and rationale:
+`docs/architecture/04-adr-001-ai-intent-layer.md` and `04-phase2-ai-plan.md`.
+
+```
+text → IntentParser (LLM, JSON schema) → ParsedCommand (user's words, no ids)
+     → matching.py / dates.py (deterministic: names → Plane ids, "วันศุกร์" → date)
+     → read-only (my tasks, search): answered immediately
+     → writes (create, start/complete, reassign, reschedule, comment): ConfirmReply first,
+       then the existing Phase 1 use cases on confirm
+```
+
+- **Configured from Plane** — Settings → AI Assistant (workspace Admin only), via prom_bridge →
+  `GET/PUT /api/v1/customers/{id}/ai-settings` and `POST .../ai-settings/test`. Settings are per
+  customer (shared by every workspace on the instance), stored in `ai_settings` (migration
+  0005); the API key is Fernet-encrypted and never returned. With no saved row, the
+  `AI_ENABLED`/`NT_AI_HUB_*` env vars are the defaults (see `.env.example`).
+- **Gateway**: any OpenAI-compatible API. Verified with NT AI Hub at
+  `https://aihub.ntaisolution.com/core-api/v1` (the `/core-api/v1` path matters — the bare domain
+  is the web dashboard). `gpt-oss-120b` is the default: ~1–2 s per command and supports strict
+  `response_format: json_schema`. Model list filtering uses the gateway's `capabilities`, not
+  `modality` (NT AI Hub mislabels two models' modality).
+- **Never breaks Phase 1**: AI off, gateway down/timeout, bad JSON, or "not understood" → the
+  normal menu. Keywords always win over AI. 30 AI messages / 10 min per user.
+- **"task นี้"**: the last work item the user listed, created, acted on, or tapped is remembered
+  in Redis for 30 min (`RedisFocusStore`).
+- **Dates**: rule-based Thai/English (`src/application/ai/dates.py`, conventions in its
+  docstring); the LLM's own ISO date is only a fallback, shown in the confirmation, and never
+  used for a relative shift on an existing due date.
+- **Audit**: `ai.command_parsed` / `ai.command_parse_failed` with the intent name — never the
+  message text. Writes keep their existing `work_item.*` audit actions; reschedule adds
+  `work_item.rescheduled`.
+
+## Daily summary & notification settings (Phase 2B)
+
+AI MVP items 4 and 5. No AI involved except that "สรุปงานให้หน่อย" / "ปิดแจ้งเตือน …" are
+recognised as shortcuts to the same panels.
+
+- **Daily summary** (`src/application/notifications/summary.py`): one 09:00 Asia/Bangkok
+  message per linked identity — overdue, due today, due tomorrow, assigned in the last 24 h
+  (read from Hub's own `outbound_message_records`, since Plane has no assignment-history
+  filter), and blocked (Plane `relations/` → `blocked_by`, counted only while the blocker isn't
+  completed; at most 20 items checked). Sent by the existing hourly `notifications.check_due_dates`
+  beat task; nothing is sent when every section is empty. On demand: type `สรุปงาน` or tap the
+  new menu button. Thai text lives in `src/channels/notification_copy.py` and is injected.
+- **New `daily_summary` notification type**, default on. While on, the per-item
+  due_soon/due_today/overdue pushes are folded into the summary; switching it off restores them.
+  The per-type switches still apply to the summary's sections.
+- **Settings** — Plane: Profile → Connected Accounts → *Notifications* on each linked account
+  (via prom_bridge, ownership-checked) → `GET/PUT /api/v1/identities/{id}/notification-preferences`.
+  Chat: `ตั้งค่าแจ้งเตือน` (or the menu button) shows a panel; tapping a type flips it.
+- **Fixed in 2B**: the morning run used to notify only identities with their *own* default
+  workspace, which skipped everyone linked through Connected Accounts. It now resolves the
+  workspace like the chat handlers (identity default → installation default → the
+  installation's only linked workspace) — `resolve_identity_workspace`.
+- `NotificationPreferenceRepository.set_enabled` is now SAVEPOINT-wrapped like the other
+  upserting repositories.
+
+## Auto-tagging (Phase 2C)
+
+AI MVP item 8: suggest labels and a priority when a work item is created from LINE/Discord —
+both the AI flow and the Phase 1 button flow.
+
+- **Rules first** (`src/application/classification/classifier.py`): per workspace connection,
+  "title contains *keyword* → label *name* and/or priority". All matching rules apply (labels
+  unioned, highest priority wins). Rules store label *names* because Plane labels are per
+  project; a name that doesn't exist in the target project is skipped.
+- **AI fallback** only when no rule matched and the workspace allows it: the LLM chooses up to 3
+  labels from the project's *existing* labels (enum in the JSON schema, then filtered again) and
+  a priority only if the title clearly signals one. Live check 2026-10-26 (`gpt-oss-120b`): Thai
+  titles tagged sensibly; a meeting title got no tags.
+- **Shown, never silent**: the confirmation lists `Label:` / `Priority:` with their origin
+  (workspace rule / AI). Users can tap "ยืนยัน (ไม่ใส่ tag)" to create without the suggestions;
+  a priority the user stated themselves ("ด่วน", "urgent" → new `priority` field in the AI
+  command) is always kept and overrides the suggestion.
+- **Never blocks creation**: label lookup, AI, or settings errors all yield "no suggestion".
+- **Settings**: Plane Settings → AI Assistant → *Auto-tagging* (workspace Admin) via
+  prom_bridge → `GET/PUT /api/v1/workspace-connections/{id}/classification`. Tables
+  `classification_settings` + `classification_rules` (migration 0006); defaults: enabled, AI
+  fallback on, no rules. Max 50 rules.
+
+## Group notifications (Phase 2D)
+
+AI MVP item 9: a LINE group/room or a Discord server text channel can follow a workspace (or one
+project) and get "🆕 new work item", "👤 assigned", "✅ completed" messages. Workflows are
+predefined: each group switches those three on/off (default: completed only). Personal
+"assigned → assignee" and "overdue → reminder" already existed.
+
+- **In the group**: `ผูกกลุ่ม` (pick workspace → project or "ทุก Project"), `ตั้งค่ากลุ่ม` (toggle
+  events), `ยกเลิกผูกกลุ่ม`, `วิธีใช้กลุ่ม`. Only users who linked their own account on this
+  bot can run them, and the project list is that user's own (re-checked on every bind, and a
+  forged workspace id in a postback is rejected) — a group can only receive titles its binder
+  could already see.
+- **Silent otherwise**: the bot answers nothing but those commands in groups — no menu, no AI.
+  (Before 2D, a group message from a user was handled like a private chat.) Discord only
+  forwards those exact commands from server channels to the handler.
+- **Delivery**: `GroupNotifier` runs inside the existing Plane-webhook Celery task, so Plane's
+  delivery-id dedup applies; one group failing never blocks other groups or personal messages.
+  Every post is audited (`group.notified` / `group.notify_failed`).
+- **Setup**: LINE Official Account Manager → Settings → allow the account to join group chats;
+  Discord needs the bot invited to the server with Send Messages and the Message Content intent.
+- Table `group_bindings` (migration 0007).
+
+## Timeline & searchable history (Phase 2E)
+
+AI MVP item 10.
+
+- **Channel recorded on every write**: work-item writes from LINE/Discord (button flows and AI)
+  now carry an `AuditOrigin`, so their `work_item.*` audit entries have installation/channel/user
+  — previously blank. Writes via the plain API still have none.
+- **Per-work-item timeline** (`src/application/work_items/timeline.py`): Plane's own activity
+  list for the item, each change labelled 💬 LINE / 🎮 Discord / 🔗 Hub / 🌐 Plane. A Plane
+  activity is attributed to a channel when a successful Hub write by the same user, of a
+  matching kind, happened within 2 minutes — a heuristic: a web edit of the same field by the
+  same person inside that window would be mislabelled. Changes made through the Hub before this
+  release show as "🔗 Hub" (no channel was recorded then).
+- **Where**: chat → open a work item → "ประวัติ" in the update menu; or type `ประวัติ` (the last
+  item you looked at); or ask the AI ("ประวัติงาน X", "ใครแก้งานนี้"). API:
+  `GET /api/v1/work-items/{id}/timeline?…&source=&kind=`.
+- **Searchable audit log**: `GET /api/v1/customers/{id}/audit-log` accepts `channel_type`,
+  `action` (substring), `target_id`, `result_status`, `occurred_after/before`; Plane's
+  Integrations page has the matching filters and Channel/Target columns.
+
+### Known limitations (Phase 2A)
+
+- Status changes via AI cover only "start" (→ first `started` state) and "complete", per MVP.
+- Searching by another person checks at most 5 projects, one page each.
+- Creating via AI picks the first state in the requested group; arbitrary state names aren't
+  matched yet.
+- The confirmation step relies on the 10-minute conversation state; an old confirm button after
+  that replies "expired" and writes nothing.
+- Live-measured on 16 sentences (the spec's examples plus variants) with `gpt-oss-120b` on NT
+  AI Hub, 2026-10-26: 16/16 correct, median 1.2 s, max 2.7 s. That is a smoke test, not the
+  ~150-sentence eval set the plan (§2.7) calls for before wide rollout — not built yet.
+  Re-run after 2B with the two new intents: 20/20, median 1.3 s.
+- 2B: the summary time is fixed at 09:00 Asia/Bangkok for everyone; it isn't per user yet.
+- 2C: suggestions apply only to work items created through the Hub (not ones created in Plane's
+  web UI), and the user can accept or decline them as a whole, not per label. Only existing
+  labels are used — a project with no labels gets priority suggestions only.
+- 2D: group messages use "#sequence name" (the payload has no project identifier); there's no
+  Plane UI listing bound groups yet — manage them from the group itself.
+- 2E: the timeline reads one page (100) of Plane activities; source attribution is heuristic
+  (see above).
+
 ## Known limitations (Gate 4)
 
 - **"My tasks" (assigned/due_today/overdue) is client-side filtered, with hard caps** — Plane's
@@ -413,9 +559,5 @@ a notification.
   `{project_identifier}-{sequence_id}: {title}` summary — that would need another delegated-
   credential lookup + `GetWorkItem` call per send; deferred as purely cosmetic (see the class
   docstring in `use_cases.py`).
-- **`NotificationPreferenceRepository.set_enabled` is select-then-insert-or-update, not
-  SAVEPOINT-wrapped** against its `(linked_identity_id, event_type)` unique constraint — unlike
-  `LinkedIdentityRepository`/`WebhookEventRepository`/`IdempotencyRepository`. A genuinely
-  concurrent double-toggle of the same preference from the same user is low-probability and
-  low-consequence (a UI double-click, not a security boundary); flagged rather than silently
-  matched to the SAVEPOINT pattern used elsewhere.
+- ~~`NotificationPreferenceRepository.set_enabled` is not SAVEPOINT-wrapped~~ — fixed in
+  Phase 2B.

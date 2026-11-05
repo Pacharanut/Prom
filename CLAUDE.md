@@ -138,6 +138,16 @@ file, an HTTPS nginx proxy on :8443 because `PromInstance.base_url` must be `htt
 non-local, `django-debug-toolbar` re-installed into `plane-api-1` after each container recreate).
 Don't touch the separate `plane-app` stack on port 3000.
 
+## Production server (shared Docker host)
+
+Prom deploys to `adminmc` (118.174.9.188), a Docker host **shared with other people's stacks**.
+Follow `deploy/server/README.md`. Run every compose command through `deploy/server/prom.sh
+{plane|hub} …`, which pins `-p prom-plane` / `-p prom-hub` and the override files. Never run
+`docker … prune`, `compose down -v`, `docker volume rm`, anything over `$(docker ps -aq)`, or
+`systemctl restart docker|nginx`. Never touch containers, volumes, or nginx files that aren't
+`prom-*`. The host nginx (not Docker) owns 80/443; Prom binds only to 127.0.0.1 (Plane :8180,
+Hub :8001).
+
 ## Docs
 
 `docs/architecture/` holds the discovery/decision record (`00-…`), threat model, verification

@@ -1,0 +1,63 @@
+# Server override for services/prom-integration-hub/deployments/docker-compose.yml on the
+# SHARED Docker host. Always used through deploy/server/prom.sh, never directly.
+#
+# - Own project name (prom-hub); container names prefixed prom-hub-.
+# - Postgres/Redis publish nothing (internal network only); API only on 127.0.0.1.
+# - Real DB password instead of the dev prom:prom.
+# - Drops the local-dev self-signed cert mount (the server uses the real wildcard cert).
+# - extra_hosts sends the public domains to the host nginx (no NAT hairpin needed).
+name: prom-hub
+
+services:
+  postgres:
+    container_name: prom-hub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${HUB_DB_PASSWORD}
+    ports: !reset []
+
+  redis:
+    container_name: prom-hub-redis
+    restart: unless-stopped
+    ports: !reset []
+
+  api:
+    container_name: prom-hub-api
+    restart: unless-stopped
+    volumes: !reset []
+    environment:
+      DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+    ports: !override
+      - "127.0.0.1:${PROM_HUB_HTTP_PORT}:8000"
+
+  worker:
+    container_name: prom-hub-worker
+    restart: unless-stopped
+    volumes: !reset []
+    environment:
+      DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+
+  beat:
+    container_name: prom-hub-beat
+    restart: unless-stopped
+    volumes: !reset []
+    environment:
+      DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+
+  discord-bot:
+    container_name: prom-hub-discord-bot
+    volumes: !reset []
+    environment:
+      DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"

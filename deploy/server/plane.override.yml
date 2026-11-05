@@ -1,0 +1,50 @@
+# Server override for plane/docker-compose.yml on the SHARED Docker host.
+# Always used through deploy/server/prom.sh, never directly.
+#
+# - Own project name (prom-plane) so volumes/networks never mix with other people's stacks.
+# - Every container_name gets a prom-plane- prefix (upstream uses generic names like "web", "api").
+# - Only the proxy publishes a port, and only on 127.0.0.1. The host nginx terminates HTTPS.
+# - extra_hosts lets api/worker reach the public domains through the host nginx without relying
+#   on NAT hairpinning.
+name: prom-plane
+
+services:
+  web:
+    container_name: prom-plane-web
+  admin:
+    container_name: prom-plane-admin
+  space:
+    container_name: prom-plane-space
+  api:
+    container_name: prom-plane-api
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+  worker:
+    container_name: prom-plane-bgworker
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+  beat-worker:
+    container_name: prom-plane-beatworker
+    extra_hosts:
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+  migrator:
+    container_name: prom-plane-migrator
+  live:
+    container_name: prom-plane-live
+  plane-db:
+    container_name: prom-plane-db
+  plane-redis:
+    container_name: prom-plane-redis
+  plane-mq:
+    container_name: prom-plane-mq
+  plane-minio:
+    container_name: prom-plane-minio
+  proxy:
+    container_name: prom-plane-proxy
+    ports: !override
+      - "127.0.0.1:${PROM_PLANE_HTTP_PORT}:80"
+    environment:
+      SITE_ADDRESS: ":80"

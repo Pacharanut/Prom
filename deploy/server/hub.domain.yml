@@ -1,0 +1,12 @@
+# Added by prom.sh only when PROM_MODE=domain. See plane.domain.yml.
+services:
+  api:
+    extra_hosts: &hosts
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+  worker:
+    extra_hosts: *hosts
+  beat:
+    extra_hosts: *hosts
+  discord-bot:
+    extra_hosts: *hosts

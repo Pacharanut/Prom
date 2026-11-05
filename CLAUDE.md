@@ -146,7 +146,8 @@ Follow `deploy/server/README.md`. Run every compose command through `deploy/serv
 `docker … prune`, `compose down -v`, `docker volume rm`, anything over `$(docker ps -aq)`, or
 `systemctl restart docker|nginx`. Never touch containers, volumes, or nginx files that aren't
 `prom-*`. The host nginx (not Docker) owns 80/443; Prom binds only to 127.0.0.1 (Plane :8180,
-Hub :8001).
+Hub :8001). `PROM_MODE=ngrok` (testing) publishes through one ngrok URL via `prom.sh edge`;
+`PROM_MODE=domain` uses host-nginx vhosts. Plane's api reaches the Hub over the `prom-net` network.
 
 ## Docs
 

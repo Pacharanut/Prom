@@ -1,0 +1,31 @@
+# ngrok test mode only (PROM_MODE=ngrok). Run through: deploy/server/prom.sh edge up -d
+#
+# One public ngrok URL serves both apps:
+#   https://<NGROK_DOMAIN>/webhooks/*  -> Hub   (127.0.0.1:PROM_HUB_HTTP_PORT)
+#   https://<NGROK_DOMAIN>/*           -> Plane (127.0.0.1:PROM_PLANE_HTTP_PORT)
+# Both containers use the host network but listen on 127.0.0.1 only (edge :8280, ngrok
+# inspector :4040), so nothing new is opened to the outside apart from the ngrok tunnel.
+name: prom-edge
+
+services:
+  edge:
+    container_name: prom-edge-nginx
+    image: nginx:1.27-alpine
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PROM_PLANE_HTTP_PORT: ${PROM_PLANE_HTTP_PORT}
+      PROM_HUB_HTTP_PORT: ${PROM_HUB_HTTP_PORT}
+      NGINX_ENVSUBST_FILTER: "^PROM_"
+    volumes:
+      - ./edge.conf.template:/etc/nginx/templates/default.conf.template:ro
+
+  ngrok:
+    container_name: prom-edge-ngrok
+    image: ngrok/ngrok:3
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [edge]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    command: ["http", "127.0.0.1:8280", "--url=https://${NGROK_DOMAIN}", "--log=stdout"]

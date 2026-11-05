@@ -1,0 +1,12 @@
+# Added by prom.sh only when PROM_MODE=domain. Sends our own public names to the host nginx
+# (Docker's host-gateway) so containers don't depend on NAT hairpinning.
+# NOT used in ngrok mode: there the names must resolve to ngrok's public servers.
+services:
+  api:
+    extra_hosts: &hosts
+      - "${PROM_DOMAIN}:host-gateway"
+      - "${PROM_HUB_DOMAIN}:host-gateway"
+  worker:
+    extra_hosts: *hosts
+  beat-worker:
+    extra_hosts: *hosts

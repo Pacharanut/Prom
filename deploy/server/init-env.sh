@@ -23,9 +23,21 @@ f="$HERE/server.env"
 if [[ -f "$f" ]]; then kept "$f"; else
   sed "s/^HUB_DB_PASSWORD=.*/HUB_DB_PASSWORD=$(rand)/" "$HERE/server.env.example" > "$f"
   created "$f"
+  echo
+  echo "Next: edit $f (PROM_MODE, ngrok token/domain or real domains), then run this script again."
+  exit 0
 fi
 # shellcheck disable=SC1090
 set -a; . "$f"; set +a
+
+if [[ "$PROM_DOMAIN" == your-name.* || "$PROM_HUB_DOMAIN" == your-name.* ]]; then
+  echo "PROM_DOMAIN / PROM_HUB_DOMAIN in $f are still placeholders. Edit them first." >&2
+  exit 1
+fi
+if [[ "$PROM_MODE" == "ngrok" && ( -z "${NGROK_AUTHTOKEN:-}" || "$PROM_DOMAIN" != "$NGROK_DOMAIN" || "$PROM_HUB_DOMAIN" != "$NGROK_DOMAIN" ) ]]; then
+  echo "ngrok mode: set NGROK_AUTHTOKEN, and PROM_DOMAIN = PROM_HUB_DOMAIN = NGROK_DOMAIN in $f." >&2
+  exit 1
+fi
 
 # Shared values for the files below (only used when a file is being created).
 PG_PASS="$(rand)"
@@ -70,6 +82,12 @@ fi
 # --- plane/apps/api/.env ------------------------------------------------------------------------
 f="$ROOT/plane/apps/api/.env"
 if [[ -f "$f" ]]; then kept "$f"; else
+  # domain mode: Plane -> Hub webhooks reach the host nginx at a private (host-gateway) IP.
+  webhook_allow="# WEBHOOK_ALLOWED_* not needed in ngrok mode (webhooks go to ngrok's public IP)."
+  if [[ "$PROM_MODE" == "domain" ]]; then
+    webhook_allow="WEBHOOK_ALLOWED_HOSTS=${PROM_HUB_DOMAIN}
+WEBHOOK_ALLOWED_IPS=172.16.0.0/12"
+  fi
   # Reuse the passwords already in plane/.env, in case only this file was missing.
   # shellcheck disable=SC1090
   set -a; . "$ROOT/plane/.env"; set +a
@@ -120,13 +138,12 @@ GUNICORN_WORKERS=2
 HARD_DELETE_AFTER_DAYS=60
 API_KEY_RATE_LIMIT=60/minute
 
-# Plane -> Hub webhooks go through the host nginx (private IP via extra_hosts), so allow it.
-WEBHOOK_ALLOWED_HOSTS=${PROM_HUB_DOMAIN}
-WEBHOOK_ALLOWED_IPS=172.16.0.0/12
+${webhook_allow}
 
-# Prom Hub bridge. PROM_INSTANCE_ID / PROM_CUSTOMER_ID are filled in after the Hub bootstrap
-# step (README step 6), then: prom.sh plane up -d --force-recreate api worker beat-worker
-PROM_HUB_BASE_URL=${HUB_URL}
+# Prom Hub bridge: Plane's api -> Hub's api over the shared prom-net Docker network.
+# PROM_INSTANCE_ID / PROM_CUSTOMER_ID are filled in after the Hub bootstrap step (README),
+# then: prom.sh plane up -d --force-recreate api worker beat-worker
+PROM_HUB_BASE_URL=http://prom-hub-api:8000
 PROM_HUB_SERVICE_TOKEN=${HUB_TOKEN}
 PROM_INSTANCE_ID=
 PROM_CUSTOMER_ID=

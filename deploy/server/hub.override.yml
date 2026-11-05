@@ -3,9 +3,9 @@
 #
 # - Own project name (prom-hub); container names prefixed prom-hub-.
 # - Postgres/Redis publish nothing (internal network only); API only on 127.0.0.1.
+# - api also joins prom-net so Plane's api reaches it as http://prom-hub-api:8000.
 # - Real DB password instead of the dev prom:prom.
-# - Drops the local-dev self-signed cert mount (the server uses the real wildcard cert).
-# - extra_hosts sends the public domains to the host nginx (no NAT hairpin needed).
+# - Drops the local-dev self-signed cert mount (not used on the server).
 name: prom-hub
 
 services:
@@ -27,9 +27,7 @@ services:
     volumes: !reset []
     environment:
       DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
-    extra_hosts:
-      - "${PROM_DOMAIN}:host-gateway"
-      - "${PROM_HUB_DOMAIN}:host-gateway"
+    networks: [default, prom-net]
     ports: !override
       - "127.0.0.1:${PROM_HUB_HTTP_PORT}:8000"
 
@@ -39,9 +37,6 @@ services:
     volumes: !reset []
     environment:
       DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
-    extra_hosts:
-      - "${PROM_DOMAIN}:host-gateway"
-      - "${PROM_HUB_DOMAIN}:host-gateway"
 
   beat:
     container_name: prom-hub-beat
@@ -49,15 +44,13 @@ services:
     volumes: !reset []
     environment:
       DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
-    extra_hosts:
-      - "${PROM_DOMAIN}:host-gateway"
-      - "${PROM_HUB_DOMAIN}:host-gateway"
 
   discord-bot:
     container_name: prom-hub-discord-bot
     volumes: !reset []
     environment:
       DATABASE_URL: postgresql+asyncpg://prom:${HUB_DB_PASSWORD}@postgres:5432/prom_hub
-    extra_hosts:
-      - "${PROM_DOMAIN}:host-gateway"
-      - "${PROM_HUB_DOMAIN}:host-gateway"
+
+networks:
+  prom-net:
+    external: true

@@ -13,7 +13,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 SERVER_ENV="$HERE/server.env"
 
 usage() {
-  echo "usage: $0 {plane|hub} <docker compose args>" >&2
+  echo "usage: $0 {plane|hub|edge} <docker compose args>" >&2
   echo "  e.g. $0 hub ps    |  $0 plane logs -f api    |  $0 hub up -d api worker beat" >&2
   exit 2
 }
@@ -23,6 +23,9 @@ stack="$1"
 shift
 
 [[ -f "$SERVER_ENV" ]] || { echo "missing $SERVER_ENV — run deploy/server/init-env.sh first" >&2; exit 1; }
+MODE="$(grep -E '^PROM_MODE=' "$SERVER_ENV" | cut -d= -f2- | tr -d '"[:space:]')"
+[[ "$MODE" == "ngrok" || "$MODE" == "domain" ]] \
+  || { echo "PROM_MODE in $SERVER_ENV must be 'ngrok' or 'domain'" >&2; exit 1; }
 
 case "$stack" in
   plane)
@@ -31,9 +34,9 @@ case "$stack" in
     args=(-p prom-plane
           --project-directory "$ROOT/plane"
           -f "$ROOT/plane/docker-compose.yml"
-          -f "$HERE/plane.override.yml"
-          --env-file "$ROOT/plane/.env"
-          --env-file "$SERVER_ENV")
+          -f "$HERE/plane.override.yml")
+    [[ "$MODE" == "domain" ]] && args+=(-f "$HERE/plane.domain.yml")
+    args+=(--env-file "$ROOT/plane/.env" --env-file "$SERVER_ENV")
     ;;
   hub)
     hub_dir="$ROOT/services/prom-integration-hub"
@@ -41,7 +44,15 @@ case "$stack" in
     args=(-p prom-hub
           --project-directory "$hub_dir/deployments"
           -f "$hub_dir/deployments/docker-compose.yml"
-          -f "$HERE/hub.override.yml"
+          -f "$HERE/hub.override.yml")
+    [[ "$MODE" == "domain" ]] && args+=(-f "$HERE/hub.domain.yml")
+    args+=(--env-file "$SERVER_ENV")
+    ;;
+  edge)
+    [[ "$MODE" == "ngrok" ]] || { echo "edge (ngrok) is only used when PROM_MODE=ngrok" >&2; exit 1; }
+    args=(-p prom-edge
+          --project-directory "$HERE/edge"
+          -f "$HERE/edge/compose.yml"
           --env-file "$SERVER_ENV")
     ;;
   *) usage ;;
@@ -67,6 +78,11 @@ if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
 else
   DOCKER=(sudo docker)
+fi
+
+# Shared network between Plane's api and the Hub's api (ours only; created once).
+if [[ "$stack" != "edge" ]] && ! "${DOCKER[@]}" network inspect prom-net >/dev/null 2>&1; then
+  "${DOCKER[@]}" network create prom-net >/dev/null && echo "created docker network prom-net"
 fi
 
 set -x
